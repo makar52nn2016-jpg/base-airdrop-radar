@@ -62,6 +62,18 @@ export const FREE_MINT_ABI = parseAbi([
   'function claim(uint256 quantity) public',
   'function freeMint() public',
   'function freeMint(uint256 quantity) public',
+  'function safeMint(address to) public',
+  'function safeMint(address to, uint256 quantity) public',
+  'function mintTo(address to) public',
+  'function mintTo(address to, uint256 quantity) public',
+  'function airdrop() public',
+  'function airdrop(address to) public',
+  'function gift() public',
+  'function gift(address to) public',
+  'function claimFree() public',
+  'function claimFree(uint256 quantity) public',
+  'function mintForFree() public',
+  'function mintForFree(uint256 quantity) public',
 ]);
 
 /**
@@ -97,15 +109,36 @@ export async function findFreeMintFunction(
   contractAddress: string
 ): Promise<{ functionName: string; args: unknown[] } | null> {
   // Try the simplest signature first: mint() with no args
+  // For functions that take an address argument, use the zero address as
+  // a safe default (most public mints ignore it for static call).
+  const zeroAddr = '0x0000000000000000000000000000000000000000';
   const candidates: { functionName: string; args: unknown[] }[] = [
+    // No-args first (simplest free mints)
     { functionName: 'mint', args: [] },
     { functionName: 'publicMint', args: [] },
     { functionName: 'claim', args: [] },
     { functionName: 'freeMint', args: [] },
+    { functionName: 'airdrop', args: [] },
+    { functionName: 'gift', args: [] },
+    { functionName: 'claimFree', args: [] },
+    { functionName: 'mintForFree', args: [] },
+    // Quantity-arg (most common)
     { functionName: 'mint', args: [1n] },
     { functionName: 'publicMint', args: [1n] },
     { functionName: 'claim', args: [1n] },
     { functionName: 'freeMint', args: [1n] },
+    { functionName: 'claimFree', args: [1n] },
+    { functionName: 'mintForFree', args: [1n] },
+    // Address-only arg (to)
+    { functionName: 'mint', args: [zeroAddr] },
+    { functionName: 'safeMint', args: [zeroAddr] },
+    { functionName: 'mintTo', args: [zeroAddr] },
+    { functionName: 'airdrop', args: [zeroAddr] },
+    { functionName: 'gift', args: [zeroAddr] },
+    // Address + quantity
+    { functionName: 'mint', args: [zeroAddr, 1n] },
+    { functionName: 'safeMint', args: [zeroAddr, 1n] },
+    { functionName: 'mintTo', args: [zeroAddr, 1n] },
   ];
 
   const contract = getContract({

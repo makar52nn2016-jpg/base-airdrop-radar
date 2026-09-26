@@ -5,7 +5,12 @@ import { base, baseSepolia } from 'viem/chains';
 import { http } from 'viem';
 import { getContract, parseAbi } from 'viem';
 import { bundlerClient, paymasterClient, publicClient, getSignerPrivateKey } from '@/lib/pimlico';
-import { listBaseCollections, getCollectionContracts } from '@/lib/opensea';
+import {
+  listBaseCollections,
+  getCollectionContracts,
+  getRecentBaseTransfers,
+  filterBaseMintEvents,
+} from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
 
 /**
@@ -82,48 +87,83 @@ export async function initSmartAccount() {
 }
 
 /**
- * Scans recent Base collections for free-mint opportunities.
+ * Scans for free-mint opportunities on Base.
  *
- * Strategy:
- *   - Get list of Base collections from OpenSea
- *   - For each, fetch contracts
- *   - For each contract, try static-call on common free-mint function signatures
- *   - If a free-mint function is callable, add to candidates
+ * Strategy v2 (better coverage):
+ *   1. Fetch recent transfer events from OpenSea (last 1 hour, default 100 events)
+ *   2. Filter to mint events (from_address = null)
+ *   3. For each unique contract address, run findFreeMintFunction static-call
+ *   4. If a free-mint function is callable, add to candidates
+ *
+ * Fallback: if events API returns nothing useful, also check top collections list.
  *
  * Returns up to `maxCandidates` candidates.
  */
 export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate[]> {
-  const collections = await listBaseCollections(20);
   const candidates: MintCandidate[] = [];
+  const tried = new Set<string>(); // dedup contract addresses within this scan
 
-  for (const col of collections) {
-    if (candidates.length >= maxCandidates) break;
+  // Strategy 1: Recent mint events
+  try {
+    const events = await getRecentBaseTransfers(100, 3600); // last hour
+    const mintContracts = filterBaseMintEvents(events);
 
-    // Skip already-attempted in this session
-    if (ATTEMPTED.has(col.slug)) continue;
+    for (const { contract: contractAddress, slug } of mintContracts) {
+      if (candidates.length >= maxCandidates) break;
+      if (tried.has(contractAddress)) continue;
+      if (ATTEMPTED.has(contractAddress)) continue;
+      tried.add(contractAddress);
 
-    try {
-      const contracts = await getCollectionContracts(col.slug);
-      for (const contractAddress of contracts) {
-        if (candidates.length >= maxCandidates) break;
-
-        const found = await findFreeMintFunction(contractAddress);
-        if (found) {
-          candidates.push({
-            slug: col.slug,
-            name: col.name,
-            contract: contractAddress,
-            functionName: found.functionName,
-            args: found.args,
-            detectedAt: new Date().toISOString(),
-            image_url: col.image_url,
-            opensea_url: col.opensea_url,
-          });
-        }
+      const found = await findFreeMintFunction(contractAddress);
+      if (found) {
+        candidates.push({
+          slug: slug || 'recent-mint',
+          name: `Recent mint ${contractAddress.slice(0, 8)}`,
+          contract: contractAddress,
+          functionName: found.functionName,
+          args: found.args,
+          detectedAt: new Date().toISOString(),
+          image_url: null,
+          opensea_url: `https://opensea.io/assets/base/${contractAddress}`,
+        });
       }
-    } catch (err) {
-      // Skip collection if any sub-call fails
-      continue;
+    }
+  } catch (err) {
+    // If events API fails, fall through to collections list
+  }
+
+  // Strategy 2 (fallback): Top collections from list
+  if (candidates.length === 0) {
+    const collections = await listBaseCollections(50); // increased from 20 to 50
+
+    for (const col of collections) {
+      if (candidates.length >= maxCandidates) break;
+      if (ATTEMPTED.has(col.slug)) continue;
+
+      try {
+        const contracts = await getCollectionContracts(col.slug);
+        for (const contractAddress of contracts) {
+          if (candidates.length >= maxCandidates) break;
+          if (tried.has(contractAddress)) continue;
+          tried.add(contractAddress);
+
+          const found = await findFreeMintFunction(contractAddress);
+          if (found) {
+            candidates.push({
+              slug: col.slug,
+              name: col.name,
+              contract: contractAddress,
+              functionName: found.functionName,
+              args: found.args,
+              detectedAt: new Date().toISOString(),
+              image_url: col.image_url,
+              opensea_url: col.opensea_url,
+            });
+          }
+        }
+      } catch (err) {
+        continue;
+      }
     }
   }
 
