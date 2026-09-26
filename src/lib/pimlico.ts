@@ -46,37 +46,36 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    // Ankr — best reliability from Vercel datacenters
-    rpcUrl: 'https://rpc.ankr.com/base',
+    // DRPC — free, no API key, supports address-less getLogs on ALL chains
+    rpcUrl: 'https://base.drpc.org',
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: 'https://rpc.ankr.com/optimism',
+    rpcUrl: 'https://optimism.drpc.org',
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
-    // Arb1 official RPC — already working, keep it
-    rpcUrl: 'https://arb1.arbitrum.io/rpc',
+    rpcUrl: 'https://arbitrum.drpc.org',
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
   },
   polygon: {
     key: 'polygon',
     chain: polygon,
-    rpcUrl: 'https://rpc.ankr.com/polygon',
+    rpcUrl: 'https://polygon.drpc.org',
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    rpcUrl: 'https://rpc.ankr.com/eth',
+    rpcUrl: 'https://eth.drpc.org',
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },
