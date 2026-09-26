@@ -67,16 +67,16 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   polygon: {
     key: 'polygon',
     chain: polygon,
-    // Ankr free public RPC — no auth, no 401 errors (polygon-rpc.com was rejecting us)
-    rpcUrl: 'https://rpc.ankr.com/polygon',
+    // PublicNode — more reliable than Ankr for getLogs (Ankr rejects wildcard topic params)
+    rpcUrl: 'https://polygon-bor-rpc.publicnode.com',
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    // Ankr free public RPC — no 403 errors (eth.llamarpc.com was blocking us)
-    rpcUrl: 'https://rpc.ankr.com/eth',
+    // PublicNode — more reliable than Ankr for getLogs
+    rpcUrl: 'https://ethereum-rpc.publicnode.com',
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },
