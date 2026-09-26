@@ -1,63 +1,137 @@
 import { createBundlerClient, createPaymasterClient } from 'viem/account-abstraction';
 import { http, createPublicClient } from 'viem';
-import { base } from 'viem/chains';
+import { base, optimism, arbitrum, polygon, mainnet } from 'viem/chains';
+import type { Chain } from 'viem';
 
 /**
- * Pimlico client setup for gasless Smart Account operations on Base.
+ * Multi-chain Pimlico client setup.
+ *
+ * Supports:
+ *   - base (chainId 8453)
+ *   - optimism (chainId 10)
+ *   - arbitrum (chainId 42161)
+ *   - polygon (chainId 137)
+ *   - ethereum (chainId 1)
+ *
+ * Each chain has its own:
+ *   - Public RPC URL (for state queries)
+ *   - Pimlico bundler URL (for UserOp submission)
+ *   - Pimlico paymaster URL (for gas sponsorship)
+ *
+ * Smart Account address is deterministic per (signer, chain) — different chain
+ * means different Smart Account address (Pimlico Safe factory varies by chain).
  *
  * Required env vars:
- *  - PIMLICO_API_KEY: from pimlico.io dashboard
- *  - SIGNER_PRIVATE_KEY: EOA private key that signs UserOperations
- *
- * Note: Pimlico's RPC endpoint supports standard ERC-4337 JSON-RPC methods
- * (eth_sendUserOperation, pm_sponsorUserOperation, etc.) — no Pimlico-specific
- * client extensions are needed for basic gasless operation.
+ *   - PIMLICO_API_KEY: from pimlico.io dashboard
+ *   - SIGNER_PRIVATE_KEY: EOA private key that signs UserOperations
  */
 
 const PIMLICO_API_KEY = process.env.PIMLICO_API_KEY || '';
 const SIGNER_PRIVATE_KEY = process.env.SIGNER_PRIVATE_KEY || '';
 
-// Pimlico endpoints (Base mainnet)
-export const PIMLICO_BUNDLER_URL = `https://api.pimlico.io/v2/base/rpc?apikey=${PIMLICO_API_KEY}`;
-export const PIMLICO_PAYMASTER_URL = `https://api.pimlico.io/v2/base/rpc?apikey=${PIMLICO_API_KEY}`;
+export type ChainKey = 'base' | 'optimism' | 'arbitrum' | 'polygon' | 'ethereum';
 
-// Public Base RPC for state queries (free, no key needed)
-export const BASE_RPC_URL = 'https://mainnet.base.org';
+interface ChainConfig {
+  key: ChainKey;
+  chain: Chain;
+  /** Public RPC for state queries (free, no key needed) */
+  rpcUrl: string;
+  /** Chain scanner base URL (e.g. basescan.org, optimistic.etherscan.io) */
+  scannerUrl: string;
+  /** OpenSea chain identifier (used in opensea.io/assets/<chain>/<addr>) */
+  openSeaChain: string;
+}
 
-// Base chain config
+export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
+  base: {
+    key: 'base',
+    chain: base,
+    rpcUrl: 'https://mainnet.base.org',
+    scannerUrl: 'https://basescan.org',
+    openSeaChain: 'base',
+  },
+  optimism: {
+    key: 'optimism',
+    chain: optimism,
+    rpcUrl: 'https://mainnet.optimism.io',
+    scannerUrl: 'https://optimistic.etherscan.io',
+    openSeaChain: 'optimism',
+  },
+  arbitrum: {
+    key: 'arbitrum',
+    chain: arbitrum,
+    rpcUrl: 'https://arb1.arbitrum.io/rpc',
+    scannerUrl: 'https://arbiscan.io',
+    openSeaChain: 'arbitrum',
+  },
+  polygon: {
+    key: 'polygon',
+    chain: polygon,
+    rpcUrl: 'https://polygon-rpc.com',
+    scannerUrl: 'https://polygonscan.com',
+    openSeaChain: 'matic',
+  },
+  ethereum: {
+    key: 'ethereum',
+    chain: mainnet,
+    rpcUrl: 'https://eth.llamarpc.com',
+    scannerUrl: 'https://etherscan.io',
+    openSeaChain: 'ethereum',
+  },
+};
+
+export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'];
+
+// Cache clients per chain (creating clients is expensive)
+const clientCache = new Map<ChainKey, { publicClient: any; bundlerClient: any; paymasterClient: any }>();
+
+function pimlicoUrl(chainKey: ChainKey): string {
+  return `https://api.pimlico.io/v2/${chainKey}/rpc?apikey=${PIMLICO_API_KEY}`;
+}
+
+/**
+ * Returns cached clients for the given chain. Creates them on first call.
+ */
+export function getClientsForChain(chainKey: ChainKey) {
+  if (clientCache.has(chainKey)) {
+    return clientCache.get(chainKey)!;
+  }
+
+  const config = CHAIN_CONFIGS[chainKey];
+
+  const publicClient = createPublicClient({
+    chain: config.chain,
+    transport: http(config.rpcUrl),
+  });
+
+  const bundlerClient = createBundlerClient({
+    chain: config.chain,
+    transport: http(pimlicoUrl(chainKey)),
+    client: publicClient,
+  });
+
+  const paymasterClient = createPaymasterClient({
+    chain: config.chain,
+    transport: http(pimlicoUrl(chainKey)),
+  });
+
+  const clients = { publicClient, bundlerClient, paymasterClient };
+  clientCache.set(chainKey, clients);
+  return clients;
+}
+
+// Backward-compat exports (use Base clients as default)
 export const baseChain = base;
-
-// Public client for state queries (read-only)
-export const publicClient = createPublicClient({
-  chain: base,
-  transport: http(BASE_RPC_URL),
-});
-
-// Bundler client — for submitting UserOperations via Pimlico
-export const bundlerClient = createBundlerClient({
-  chain: base,
-  transport: http(PIMLICO_BUNDLER_URL),
-  client: publicClient,
-});
-
-// Paymaster client — for gas sponsorship via Pimlico
-// Pimlico supports both `pm_getPaymasterData` (for generic paymaster) and
-// `pm_sponsorUserOperation` (for sponsored mode). We use the standard
-// paymasterActions — no Pimlico-specific extensions needed.
-export const paymasterClient = createPaymasterClient({
-  chain: base,
-  transport: http(PIMLICO_PAYMASTER_URL),
-});
+export const publicClient = getClientsForChain('base').publicClient;
+export const bundlerClient = getClientsForChain('base').bundlerClient;
+export const paymasterClient = getClientsForChain('base').paymasterClient;
 
 /**
  * Returns the signer private key if configured.
- * Throws with a clear error if missing.
  */
 export function getSignerPrivateKey(): `0x${string}` {
   if (!SIGNER_PRIVATE_KEY) {
-    throw new Error(
-      'SIGNER_PRIVATE_KEY env var is not set. Generate a private key and add it in Vercel env vars.'
-    );
+    throw new Error('SIGNER_PRIVATE_KEY env var is not set.');
   }
   if (!SIGNER_PRIVATE_KEY.startsWith('0x')) {
     return `0x${SIGNER_PRIVATE_KEY}` as `0x${string}`;
@@ -66,14 +140,11 @@ export function getSignerPrivateKey(): `0x${string}` {
 }
 
 /**
- * Checks if the Pimlico setup is properly configured.
+ * Checks if Pimlico is configured.
  */
 export function isPimlicoConfigured(): { configured: boolean; missing: string[] } {
   const missing: string[] = [];
   if (!PIMLICO_API_KEY) missing.push('PIMLICO_API_KEY');
   if (!SIGNER_PRIVATE_KEY) missing.push('SIGNER_PRIVATE_KEY');
-  return {
-    configured: missing.length === 0,
-    missing,
-  };
+  return { configured: missing.length === 0, missing };
 }

@@ -161,38 +161,57 @@ export async function getRecentBaseTransfers(
 }
 
 /**
- * Filters events to ONLY Base chain mint events.
+ * Filters events to ONLY mint events on the specified chains.
  *
  * A "mint" is identified by `transfer_type === "mint"` OR
  * `from_address === null` OR `from_address === "0x0...0000"`.
  *
- * Returns distinct contract addresses on Base.
+ * Returns distinct contract addresses grouped by chain.
+ *
+ * @param supportedChains — list of chain identifiers to keep (e.g. ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'])
  */
-export function filterBaseMintEvents(events: OpenSeaEvent[]): { contract: string; slug?: string }[] {
-  const mintContracts = new Map<string, { contract: string; slug?: string }>();
+export function filterMintEventsForChains(
+  events: OpenSeaEvent[],
+  supportedChains: string[]
+): { contract: string; chain: string; slug?: string }[] {
+  const mintContracts = new Map<string, { contract: string; chain: string; slug?: string }>();
   const zeroAddress = '0x0000000000000000000000000000000000000000'.toLowerCase();
+  const supportedSet = new Set(supportedChains);
 
   for (const e of events) {
-    const isBase = e.chain === 'base';
+    const chain = e.chain || '';
+    if (!supportedSet.has(chain)) continue;
+
     const isMint =
       e.transfer_type === 'mint' ||
       e.from_address === null ||
       (e.from_address && e.from_address.toLowerCase() === zeroAddress);
 
-    if (!isBase || !isMint) continue;
+    if (!isMint) continue;
 
     const contract = e.nft?.contract?.toLowerCase();
     if (!contract) continue;
 
-    if (!mintContracts.has(contract)) {
-      mintContracts.set(contract, {
+    const key = `${chain}:${contract}`;
+    if (!mintContracts.has(key)) {
+      mintContracts.set(key, {
         contract,
+        chain,
         slug: e.collection_slug || undefined,
       });
     }
   }
 
   return [...mintContracts.values()];
+}
+
+/**
+ * Legacy filter — only Base chain. Kept for backward compat.
+ * New code should use filterMintEventsForChains(['base', 'optimism', ...]).
+ */
+export function filterBaseMintEvents(events: OpenSeaEvent[]): { contract: string; slug?: string }[] {
+  const baseOnly = filterMintEventsForChains(events, ['base']);
+  return baseOnly.map(({ contract, slug }) => ({ contract, slug }));
 }
 
 /**

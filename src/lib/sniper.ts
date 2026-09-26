@@ -4,12 +4,21 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { http } from 'viem';
 import { getContract, parseAbi } from 'viem';
-import { bundlerClient, paymasterClient, publicClient, getSignerPrivateKey } from '@/lib/pimlico';
+import {
+  bundlerClient,
+  paymasterClient,
+  publicClient,
+  getSignerPrivateKey,
+  getClientsForChain,
+  CHAIN_CONFIGS,
+  ALL_CHAINS,
+  type ChainKey,
+} from '@/lib/pimlico';
 import {
   listBaseCollections,
   getCollectionContracts,
   getRecentBaseTransfers,
-  filterBaseMintEvents,
+  filterMintEventsForChains,
   getAssetContractInfo,
 } from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
@@ -41,6 +50,10 @@ export interface MintCandidate {
   source?: 'basescan' | 'fallback';
   /** Function inputs from Basescan ABI (used to build correct ABI for writeContract) */
   abiInputs?: any[];
+  /** Chain identifier (base, optimism, arbitrum, polygon, ethereum) */
+  chain?: ChainKey;
+  /** Collection floor price in native token (e.g. ETH), if known */
+  floorPrice?: number | null;
 }
 
 export interface MintResult {
@@ -63,14 +76,18 @@ const ATTEMPTED = new Set<string>();
  * Initializes the Pimlico Smart Account from the configured signer key.
  * Returns the smartAccount (with bundler client) and the derived address.
  *
- * Uses Safe Smart Account implementation (Pimlico's default).
+ * v2 — supports multiple chains. Pass chainKey to init on a specific chain.
+ * Each chain has a different Smart Account address (different Safe factory).
+ *
+ * Default: chainKey='base' for backward compat.
  */
-export async function initSmartAccount() {
+export async function initSmartAccount(chainKey: ChainKey = 'base') {
   const privateKey = getSignerPrivateKey();
   const signer = privateKeyToAccount(privateKey);
+  const { publicClient: pc, bundlerClient: bc, paymasterClient: pmc } = getClientsForChain(chainKey);
 
   const smartAccount = await toSafeSmartAccount({
-    client: publicClient,
+    client: pc,
     owners: [signer],
     threshold: 1n,
     version: '1.4.1',
@@ -78,11 +95,13 @@ export async function initSmartAccount() {
 
   const smartAccountClient = createSmartAccountClient({
     account: smartAccount,
-    chain: base,
-    bundlerTransport: http(process.env.PIMLICO_BUNDLER_URL_OVERRIDE || `https://api.pimlico.io/v2/base/rpc?apikey=${process.env.PIMLICO_API_KEY}`),
-    paymaster: paymasterClient,
+    chain: CHAIN_CONFIGS[chainKey].chain,
+    bundlerTransport: http(
+      `https://api.pimlico.io/v2/${chainKey}/rpc?apikey=${process.env.PIMLICO_API_KEY}`
+    ),
+    paymaster: pmc,
     paymasterContext: {
-      policyId: process.env.PIMLICO_SPONSOR_POLICY_ID, // optional — falls back to default sponsored mode
+      policyId: process.env.PIMLICO_SPONSOR_POLICY_ID,
     },
   });
 
@@ -91,7 +110,26 @@ export async function initSmartAccount() {
     smartAccountClient,
     signer,
     smartAccountAddress: smartAccount.address,
+    chainKey,
+    chainConfig: CHAIN_CONFIGS[chainKey],
   };
+}
+
+/**
+ * Backward-compat: getSmartAccountAddress() — returns Base Smart Account address.
+ * Use getSmartAccountAddressForChain(chainKey) for multi-chain.
+ */
+export async function getSmartAccountAddress(): Promise<string> {
+  const { smartAccountAddress } = await initSmartAccount('base');
+  return smartAccountAddress;
+}
+
+/**
+ * Returns Smart Account address for the specified chain.
+ */
+export async function getSmartAccountAddressForChain(chainKey: ChainKey): Promise<string> {
+  const { smartAccountAddress } = await initSmartAccount(chainKey);
+  return smartAccountAddress;
 }
 
 /**
@@ -112,17 +150,36 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   const tried = new Set<string>(); // dedup contract addresses within this scan
   const allScannedAddresses: string[] = [];
 
-  // Strategy 1: Recent mint events (extended window: 6 hours, more events)
+  // Map OpenSea chain names to our ChainKey (polygon uses 'matic' on OpenSea)
+  const openSeaToChainKey: Record<string, ChainKey> = {
+    base: 'base',
+    optimism: 'optimism',
+    arbitrum: 'arbitrum',
+    matic: 'polygon',
+    ethereum: 'ethereum',
+  };
+
+  // Strategy 1: Recent mint events across ALL supported chains
   try {
     const events = await getRecentBaseTransfers(100, 6 * 3600); // last 6 hours
-    const mintContracts = filterBaseMintEvents(events);
+    // Use new multi-chain filter — accepts events from base/optimism/arbitrum/polygon/ethereum
+    const mintContracts = filterMintEventsForChains(events, [
+      'base',
+      'optimism',
+      'arbitrum',
+      'matic', // polygon
+      'ethereum',
+    ]);
 
-    for (const { contract: contractAddress, slug } of mintContracts) {
+    for (const { contract: contractAddress, slug, chain } of mintContracts) {
       if (candidates.length >= maxCandidates) break;
-      if (tried.has(contractAddress)) continue;
-      if (ATTEMPTED.has(contractAddress)) continue;
-      tried.add(contractAddress);
+      const dedupKey = `${chain}:${contractAddress}`;
+      if (tried.has(dedupKey)) continue;
+      if (ATTEMPTED.has(dedupKey)) continue;
+      tried.add(dedupKey);
       allScannedAddresses.push(contractAddress);
+
+      const chainKey: ChainKey = openSeaToChainKey[chain] || 'base';
 
       // Quality check: get contract info from OpenSea, check for spam
       let actualSlug = slug;
@@ -154,9 +211,10 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
           args: found.args,
           detectedAt: new Date().toISOString(),
           image_url: collectionImageUrl,
-          opensea_url: `https://opensea.io/assets/base/${contractAddress}`,
+          opensea_url: `https://opensea.io/assets/${chain}/${contractAddress}`,
           source: found.source,
           abiInputs: found.abiInputs,
+          chain: chainKey,
         });
       }
     }
@@ -222,7 +280,8 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
   recordMintAttempt();
   try {
-    const { smartAccountClient, smartAccountAddress } = await initSmartAccount();
+    const chainKey = candidate.chain || 'base';
+    const { smartAccountClient, smartAccountAddress, chainConfig } = await initSmartAccount(chainKey);
 
     // Build the right ABI for the call:
     // - If we have Basescan-detected inputs, build a minimal ABI for just that function
@@ -258,7 +317,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
 
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
-    ATTEMPTED.add(candidate.slug);
+    ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
     recordMintSuccess();
 
     // Notify Telegram (fire-and-forget — don't block on failure)
@@ -269,11 +328,12 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
       smartAccountAddress,
       collectionName: candidate.name,
       openseaUrl: candidate.opensea_url,
-      chain: 'base',
+      chain: chainKey,
     }).catch(() => {});
 
     return result;
   } catch (err: any) {
+    const chainKey = candidate.chain || 'base';
     const result: MintResult = {
       candidate,
       success: false,
@@ -281,7 +341,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     };
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
-    ATTEMPTED.add(candidate.slug);
+    ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
     recordMintFailure();
 
     // Notify Telegram (fire-and-forget)
@@ -290,7 +350,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
       functionName: candidate.functionName,
       error: err?.message || String(err),
       collectionName: candidate.name,
-      chain: 'base',
+      chain: chainKey,
     }).catch(() => {});
 
     return result;

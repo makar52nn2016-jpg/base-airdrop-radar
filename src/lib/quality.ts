@@ -8,6 +8,7 @@ import { getCollectionDetail } from '@/lib/opensea';
  *   2. Collection has no description (most legit collections describe themselves)
  *   3. Name contains obvious spam keywords ("test", "spam", "fake", "scam", "airdrop claim free")
  *   4. Collection is disabled or NSFW on OpenSea
+ *   5. (NEW) Floor price = 0 AND total_supply > 1000 — likely spam with no market
  *
  * Returns true if contract looks spammy (should skip).
  */
@@ -31,19 +32,16 @@ export interface QualityCheckResult {
   floorPrice?: number | null;
   collectionName?: string;
   collectionImage?: string | null;
+  totalSupply?: number | null;
+  hasMarket?: boolean; // true if floor > 0 OR supply < 1000 (likely fresh)
 }
 
 /**
  * Checks if a contract looks like a legitimate free-mint collection.
  *
- * Uses OpenSea collection detail API (requires the slug or contract address).
- *
- * @param slugOrContract — collection slug or contract address
- * @param skipFloorCheck — if true, doesn't require floor price > 0 (useful for new collections)
+ * @param slug collection slug from OpenSea
  */
-export async function checkContractQuality(
-  slug?: string
-): Promise<QualityCheckResult> {
+export async function checkContractQuality(slug?: string): Promise<QualityCheckResult> {
   if (!slug) {
     // No slug provided — can't check OpenSea, allow by default
     return { isSpam: false };
@@ -76,11 +74,27 @@ export async function checkContractQuality(
       return { isSpam: true, reason: 'No image and no description' };
     }
 
+    // Check 4 (NEW): floor = 0 AND supply > 1000 — clearly spam with no market
+    const totalSupply = detail.contracts?.reduce((sum, c) => sum + (c.total_supply || 0), 0) || 0;
+    const floorPrice = detail.floor_price ?? null;
+    const hasMarket = (floorPrice !== null && floorPrice > 0) || totalSupply < 1000;
+
+    if (floorPrice === 0 && totalSupply > 1000) {
+      return {
+        isSpam: true,
+        reason: `No market (floor=0, supply=${totalSupply})`,
+        floorPrice,
+        totalSupply,
+      };
+    }
+
     return {
       isSpam: false,
-      floorPrice: detail.floor_price ?? null,
+      floorPrice,
       collectionName: detail.name,
       collectionImage: detail.image_url,
+      totalSupply,
+      hasMarket,
     };
   } catch (e) {
     // OpenSea API error — allow (don't block mints on API failures)
