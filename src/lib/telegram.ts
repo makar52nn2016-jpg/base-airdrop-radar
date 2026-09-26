@@ -60,6 +60,7 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
 
 /**
  * Notifies about a successful mint.
+ * Basic version — called immediately after txHash is known.
  */
 export async function notifyMintSuccess(opts: {
   contract: string;
@@ -84,7 +85,88 @@ export async function notifyMintSuccess(opts: {
 📜 *Contract:* [${opts.contract.slice(0, 10)}...](${`https://${chain}scan.org/address/${opts.contract}`})
 🎫 *Tx:* [${opts.txHash.slice(0, 10)}...](${txUrl})
 
-🌐 *[View on OpenSea](${osUrl})*
+🌐 *[View on OpenSea](${osUrl})* — listing link incoming...
+👤 *[View Smart Account](${walletUrl})*
+`;
+
+  await sendTelegramMessage(msg);
+}
+
+/**
+ * Sends a follow-up message with the direct OpenSea sell URL (with token_id extracted from receipt).
+ * Called separately after we fetch the receipt (10-30s after mint).
+ */
+export async function notifyListingLink(opts: {
+  contract: string;
+  tokenId: string;
+  chain?: string;
+  collectionName?: string;
+  estimatedFloor?: number | null;
+}): Promise<void> {
+  const chain = opts.chain || 'base';
+  const name = opts.collectionName || `Contract ${opts.contract.slice(0, 10)}`;
+  const sellUrl = `https://opensea.io/assets/${chain}/${opts.contract}/${opts.tokenId}/sell`;
+
+  const floorLine =
+    opts.estimatedFloor !== undefined && opts.estimatedFloor !== null && opts.estimatedFloor > 0
+      ? `\n💰 *Floor:* ~${opts.estimatedFloor} ETH (list at this or slightly below for fast sale)`
+      : '\n💰 *Floor:* unknown — check the page before listing';
+
+  const msg = `🚀 *Ready to list — ${name}*
+
+🎫 *Token ID:* \`${opts.tokenId}\`
+⛓ *Chain:* ${chain}${floorLine}
+
+⚡ *[OPEN SELL FORM](${sellUrl})* ← click, enter price, confirm
+
+💡 *Tip:* List 5-10% below floor for fast sale. OpenSea takes 2.5% fee.`;
+
+  await sendTelegramMessage(msg);
+}
+
+/**
+ * Notifies about a successful mint WITH direct OpenSea sell link.
+ *
+ * After a mint succeeds, we wait for the receipt, parse Transfer events to
+ * extract the token_id, then build a direct URL to OpenSea's sell form.
+ * User clicks → enters price → lists.
+ *
+ * This is the fastest path to profit (auto-listing via Seaport is complex,
+ * but a pre-filled sell URL is enough for fast manual listing).
+ */
+export async function notifyMintSuccessWithListing(opts: {
+  contract: string;
+  txHash: string;
+  smartAccountAddress: string;
+  collectionName?: string;
+  chain?: string;
+  openseaSellUrl?: string;
+  tokenId?: string;
+  estimatedFloor?: number | null;
+}): Promise<void> {
+  const chain = opts.chain || 'base';
+  const name = opts.collectionName || `Contract ${opts.contract.slice(0, 10)}`;
+
+  const sellUrl = opts.openseaSellUrl || `https://opensea.io/assets/${chain}/${opts.contract}`;
+  const txUrl = `https://${chain}scan.org/tx/${opts.txHash}`; // Note: this only works for some chains
+  const walletUrl = `https://opensea.io/${opts.smartAccountAddress}`;
+
+  const tokenIdLine = opts.tokenId
+    ? `\n🎫 *Token ID:* \`${opts.tokenId}\``
+    : '';
+  const floorLine =
+    opts.estimatedFloor !== undefined && opts.estimatedFloor !== null
+      ? `\n💰 *Floor:* ${opts.estimatedFloor} ETH`
+      : '';
+
+  const msg = `✅ *Mint succeeded!*
+
+📦 *Collection:* ${name}
+⛓ *Chain:* ${chain}
+📜 *Contract:* [${opts.contract.slice(0, 10)}...](${`https://${chain}scan.org/address/${opts.contract}`})${tokenIdLine}${floorLine}
+🎫 *Tx:* [${opts.txHash.slice(0, 10)}...](${txUrl})
+
+🚀 *[LIST FOR SALE NOW](${sellUrl})* ← click to open sell form
 👤 *[View Smart Account](${walletUrl})*
 `;
 

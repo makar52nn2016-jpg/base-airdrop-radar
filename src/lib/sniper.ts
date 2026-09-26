@@ -2,7 +2,7 @@ import { createSmartAccountClient } from 'permissionless';
 import { toSafeSmartAccount } from 'permissionless/accounts';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
-import { http } from 'viem';
+import { http, parseEventLogs } from 'viem';
 import { getContract, parseAbi } from 'viem';
 import {
   bundlerClient,
@@ -20,10 +20,11 @@ import {
   getRecentBaseTransfers,
   filterMintEventsForChains,
   getAssetContractInfo,
+  getCollectionDetail,
 } from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
 import { recordScan, recordMintAttempt, recordMintSuccess, recordMintFailure } from '@/lib/stats';
-import { notifyMintSuccess, notifyMintFailure } from '@/lib/telegram';
+import { notifyMintSuccess, notifyMintFailure, notifyListingLink } from '@/lib/telegram';
 import { checkContractQuality, isSpammyName } from '@/lib/quality';
 
 /**
@@ -277,6 +278,80 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
  *
  * The Paymaster sponsors gas — no ETH needed on Smart Account.
  */
+/**
+ * Fire-and-forget: fetches tx receipt, extracts ERC-721 token_id from Transfer event,
+ * then sends a Telegram message with direct OpenSea sell URL.
+ *
+ * Called after successful mint. Doesn't block the main flow.
+ *
+ * Transfer event signature: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+ * Topic0: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d
+ * For mint: topics[1] (from) = 0x0000...0000
+ * TokenId: topics[3] (big-endian uint256 as hex)
+ */
+const TRANSFER_EVENT_TOPIC =
+  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d';
+const ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+async function sendListingLinkAfterReceipt(
+  txHash: string,
+  chainKey: ChainKey,
+  candidate: MintCandidate
+): Promise<void> {
+  try {
+    const { publicClient: pc } = getClientsForChain(chainKey);
+
+    // Wait for tx receipt (usually 5-15s on L2, 15-30s on L1)
+    const receipt = await pc.waitForTransactionReceipt({
+      hash: txHash as `0x${string}`,
+      timeout: 60_000,
+      confirmations: 1,
+    });
+
+    // Find Transfer event where from = 0x0 (mint) and the contract is ours
+    const contractLower = candidate.contract.toLowerCase();
+    const mintLogs = (receipt.logs || []).filter(
+      (log: any) =>
+        log.address?.toLowerCase() === contractLower &&
+        log.topics?.[0] === TRANSFER_EVENT_TOPIC &&
+        log.topics?.[1] === ZERO_ADDRESS_TOPIC
+    );
+
+    if (mintLogs.length === 0) {
+      // Could be ERC-1155 (different event signature) — bail gracefully
+      return;
+    }
+
+    // Take the first mint log's token_id
+    const tokenIdHex = mintLogs[0].topics?.[3];
+    if (!tokenIdHex) return;
+    const tokenId = BigInt(tokenIdHex).toString();
+
+    // Try to fetch floor price from OpenSea (best-effort, don't fail if API errors)
+    let estimatedFloor: number | null = null;
+    if (candidate.slug && candidate.slug !== 'recent-mint' && candidate.slug !== 'manual') {
+      try {
+        const detail = await getCollectionDetail(candidate.slug);
+        estimatedFloor = detail?.floor_price ?? null;
+      } catch {
+        // ignore
+      }
+    }
+
+    // Send the listing-link Telegram message
+    await notifyListingLink({
+      contract: candidate.contract,
+      tokenId,
+      chain: chainKey,
+      collectionName: candidate.name,
+      estimatedFloor,
+    });
+  } catch (e) {
+    // Don't throw — this is fire-and-forget
+    console.error('[sniper] sendListingLinkAfterReceipt error:', e);
+  }
+}
+
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
   recordMintAttempt();
   try {
@@ -330,6 +405,9 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
       openseaUrl: candidate.opensea_url,
       chain: chainKey,
     }).catch(() => {});
+
+    // Fire-and-forget: fetch receipt, extract token_id, send direct OpenSea sell link
+    void sendListingLinkAfterReceipt(txHash, chainKey, candidate).catch(() => {});
 
     return result;
   } catch (err: any) {

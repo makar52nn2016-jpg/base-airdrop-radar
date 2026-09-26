@@ -194,19 +194,13 @@ Address: \`${smartAccount}\`
     }
 
     case '/chains': {
-      const lines: string[] = ['⛓ *Smart Accounts per chain*'];
-      for (const chainKey of ALL_CHAINS) {
-        try {
-          const addr = await getSmartAccountAddressForChain(chainKey);
-          const config = CHAIN_CONFIGS[chainKey];
-          lines.push(
-            `\n*${chainKey}* (\`${config.chain.id}\`)\n  \`${addr}\`\n  [OpenSea](https://opensea.io/${addr}) · [Scanner](${config.scannerUrl}/address/${addr})`
-          );
-        } catch (e: any) {
-          lines.push(`\n*${chainKey}*: init failed — ${e.message?.slice(0, 80)}`);
-        }
+      const { getAllChainAddresses, formatChainsMessage } = await import('@/lib/chains-cache');
+      try {
+        const chains = await getAllChainAddresses();
+        return formatChainsMessage(chains);
+      } catch (e: any) {
+        return `❌ Failed to init chains: ${e.message?.slice(0, 200)}`;
       }
-      return lines.join('\n');
     }
 
     case '/profit':
