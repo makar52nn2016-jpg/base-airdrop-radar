@@ -12,6 +12,7 @@ import {
   filterBaseMintEvents,
 } from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
+import { recordScan, recordMintAttempt, recordMintSuccess, recordMintFailure } from '@/lib/stats';
 
 /**
  * Core sniper logic.
@@ -99,13 +100,14 @@ export async function initSmartAccount() {
  *
  * Returns up to `maxCandidates` candidates.
  */
-export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate[]> {
+export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidate[]> {
   const candidates: MintCandidate[] = [];
   const tried = new Set<string>(); // dedup contract addresses within this scan
+  const allScannedAddresses: string[] = [];
 
-  // Strategy 1: Recent mint events
+  // Strategy 1: Recent mint events (extended window: 6 hours, more events)
   try {
-    const events = await getRecentBaseTransfers(100, 3600); // last hour
+    const events = await getRecentBaseTransfers(100, 6 * 3600); // last 6 hours
     const mintContracts = filterBaseMintEvents(events);
 
     for (const { contract: contractAddress, slug } of mintContracts) {
@@ -113,6 +115,7 @@ export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate
       if (tried.has(contractAddress)) continue;
       if (ATTEMPTED.has(contractAddress)) continue;
       tried.add(contractAddress);
+      allScannedAddresses.push(contractAddress);
 
       const found = await findFreeMintFunction(contractAddress);
       if (found) {
@@ -134,7 +137,7 @@ export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate
 
   // Strategy 2 (fallback): Top collections from list
   if (candidates.length === 0) {
-    const collections = await listBaseCollections(50); // increased from 20 to 50
+    const collections = await listBaseCollections(50);
 
     for (const col of collections) {
       if (candidates.length >= maxCandidates) break;
@@ -146,6 +149,7 @@ export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate
           if (candidates.length >= maxCandidates) break;
           if (tried.has(contractAddress)) continue;
           tried.add(contractAddress);
+          allScannedAddresses.push(contractAddress);
 
           const found = await findFreeMintFunction(contractAddress);
           if (found) {
@@ -167,6 +171,9 @@ export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate
     }
   }
 
+  // Record stats
+  recordScan(candidates.length, allScannedAddresses);
+
   return candidates;
 }
 
@@ -182,6 +189,7 @@ export async function scanForFreeMints(maxCandidates = 5): Promise<MintCandidate
  * The Paymaster sponsors gas — no ETH needed on Smart Account.
  */
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
+  recordMintAttempt();
   try {
     const { smartAccountClient, smartAccountAddress } = await initSmartAccount();
 
@@ -204,6 +212,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(candidate.slug);
+    recordMintSuccess();
 
     return result;
   } catch (err: any) {
@@ -215,6 +224,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(candidate.slug);
+    recordMintFailure();
     return result;
   }
 }
