@@ -1,48 +1,64 @@
 /**
  * OpenSea API v2 client.
  *
- * Used to fetch recently-created NFT collections on Base chain.
  * Free tier: 4 req/sec, 10k requests/day.
+ * Required env: OPENSEA_API_KEY (from opensea.io/settings/api-keys)
  *
- * Required env var: OPENSEA_API_KEY (32-char hex string from opensea.io/settings/api-keys)
+ * Endpoints used:
+ *   GET /api/v2/collections?chain=base           — list collections on Base
+ *   GET /api/v2/collections/{slug}                — single collection detail
+ *   GET /api/v2/collections/{slug}/listings       — current listings (for floor price)
  */
 
 const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY || '';
 const OPENSEA_BASE_URL = 'https://api.opensea.io/api/v2';
 
-export interface OpenSeaCollection {
-  /** Collection slug — used for URLs and detail lookups */
+export interface OpenSeaCollectionSummary {
+  /** Collection slug — used as ID */
   slug: string;
-  /** Contract address (lowercase, no 0x prefix variant) */
-  contract: string;
-  /** Chain id — for Base it's "base" */
-  chain: string;
-  /** Collection name */
+  /** Display name */
   name: string;
-  /** Description (may be empty) */
   description: string | null;
-  /** Image URL (collection logo) */
   image_url: string | null;
-  /** Floor price in ETH (null if no listings yet) */
+  banner_image_url: string | null;
+  owner: string | null;
+  safelist_status: string;
+  category: string | null;
+  is_disabled: boolean;
+  is_nsfw: boolean;
+  opensea_url: string;
+}
+
+export interface OpenSeaCollectionDetail extends OpenSeaCollectionSummary {
+  /** Contracts associated with this collection (may be more than one) */
+  contracts: Array<{
+    address: string;
+    chain: string;
+    token_standard: string;
+    /** Total supply minted */
+    total_supply: number;
+    /** Total minted (with burned counted) */
+    total_minted: number;
+  }>;
+  /** Floor price in chain's native currency (ETH) */
   floor_price: number | null;
-  /** Total supply minted so far */
-  total_supply: number | null;
-  /** Creation date (ISO) */
+  /** Creation date ISO */
   created_date: string | null;
 }
 
-export interface OpenSeaCollectionsResponse {
-  collections: OpenSeaCollection[];
+interface CollectionsListResponse {
+  collections: OpenSeaCollectionSummary[];
 }
 
+// Response shape from /api/v2/collections/{slug} is identical to OpenSeaCollectionDetail
+// (no extra fields at top level), so we just alias the type for clarity.
+type CollectionDetailResponse = OpenSeaCollectionDetail;
+
 /**
- * Fetches recently-created collections on Base.
- * Returns up to `limit` collections (default 20).
- *
- * OpenSea API v2: GET /api/v2/collections?chain={chain}
- * Supports pagination via `next` cursor.
+ * Fetches collections on Base chain.
+ * Returns up to `limit` collections (default 50).
  */
-export async function getRecentBaseCollections(limit = 20): Promise<OpenSeaCollection[]> {
+export async function listBaseCollections(limit = 50): Promise<OpenSeaCollectionSummary[]> {
   if (!OPENSEA_API_KEY) {
     throw new Error('OPENSEA_API_KEY env var is not set');
   }
@@ -61,14 +77,14 @@ export async function getRecentBaseCollections(limit = 20): Promise<OpenSeaColle
     throw new Error(`OpenSea API error: ${response.status} ${response.statusText}`);
   }
 
-  const data = (await response.json()) as OpenSeaCollectionsResponse;
+  const data = (await response.json()) as CollectionsListResponse;
   return (data.collections || []).slice(0, limit);
 }
 
 /**
- * Fetches a single collection by slug.
+ * Fetches a single collection's full details (including contracts).
  */
-export async function getCollectionBySlug(slug: string): Promise<OpenSeaCollection | null> {
+export async function getCollectionDetail(slug: string): Promise<OpenSeaCollectionDetail | null> {
   if (!OPENSEA_API_KEY) {
     throw new Error('OPENSEA_API_KEY env var is not set');
   }
@@ -88,7 +104,17 @@ export async function getCollectionBySlug(slug: string): Promise<OpenSeaCollecti
     throw new Error(`OpenSea API error: ${response.status} ${response.statusText}`);
   }
 
-  return (await response.json()) as OpenSeaCollection;
+  return (await response.json()) as CollectionDetailResponse;
+}
+
+/**
+ * Convenience: returns contract addresses for a collection on Base.
+ * Empty if collection has no Base contracts.
+ */
+export async function getCollectionContracts(slug: string): Promise<string[]> {
+  const detail = await getCollectionDetail(slug);
+  if (!detail) return [];
+  return detail.contracts.filter((c) => c.chain === 'base').map((c) => c.address);
 }
 
 /**

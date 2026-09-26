@@ -1,5 +1,4 @@
 import { createBundlerClient, createPaymasterClient } from 'viem/account-abstraction';
-import { pimlicoBundlerActions, pimlicoPaymasterActions } from 'permissionless';
 import { http, createPublicClient } from 'viem';
 import { base } from 'viem/chains';
 
@@ -9,6 +8,10 @@ import { base } from 'viem/chains';
  * Required env vars:
  *  - PIMLICO_API_KEY: from pimlico.io dashboard
  *  - SIGNER_PRIVATE_KEY: EOA private key that signs UserOperations
+ *
+ * Note: Pimlico's RPC endpoint supports standard ERC-4337 JSON-RPC methods
+ * (eth_sendUserOperation, pm_sponsorUserOperation, etc.) — no Pimlico-specific
+ * client extensions are needed for basic gasless operation.
  */
 
 const PIMLICO_API_KEY = process.env.PIMLICO_API_KEY || '';
@@ -35,15 +38,16 @@ export const bundlerClient = createBundlerClient({
   chain: base,
   transport: http(PIMLICO_BUNDLER_URL),
   client: publicClient,
-})
-  .extend(pimlicoBundlerActions());
+});
 
 // Paymaster client — for gas sponsorship via Pimlico
+// Pimlico supports both `pm_getPaymasterData` (for generic paymaster) and
+// `pm_sponsorUserOperation` (for sponsored mode). We use the standard
+// paymasterActions — no Pimlico-specific extensions needed.
 export const paymasterClient = createPaymasterClient({
   chain: base,
   transport: http(PIMLICO_PAYMASTER_URL),
-})
-  .extend(pimlicoPaymasterActions());
+});
 
 /**
  * Returns the signer private key if configured.
