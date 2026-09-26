@@ -446,16 +446,26 @@ async function sendListingLinkAfterReceipt(
 
     // Try to fetch floor price from OpenSea (best-effort, don't fail if API errors)
     let estimatedFloor: number | null = null;
-    if (candidate.slug && candidate.slug !== 'recent-mint' && candidate.slug !== 'manual') {
+    let listingPriceEth: string | null = null;
+    if (candidate.slug && candidate.slug !== 'recent-mint' && candidate.slug !== 'manual' && candidate.slug !== `chain-${chainKey}`) {
       try {
         const detail = await getCollectionDetail(candidate.slug);
         estimatedFloor = detail?.floor_price ?? null;
+        // If we have floor, list at 5% below for fast sale; otherwise default to 0.005 ETH
+        if (estimatedFloor && estimatedFloor > 0) {
+          listingPriceEth = (estimatedFloor * 0.95).toFixed(6);
+        }
       } catch {
         // ignore
       }
     }
 
-    // Send the listing-link Telegram message
+    // Default listing price if no floor: 0.005 ETH (~$15) — small price for fast sales
+    if (!listingPriceEth) {
+      listingPriceEth = process.env.LISTING_PRICE_ETH || '0.005';
+    }
+
+    // Send Telegram message with direct sell URL (manual fallback)
     await notifyListingLink({
       contract: candidate.contract,
       tokenId,
@@ -463,6 +473,44 @@ async function sendListingLinkAfterReceipt(
       collectionName: candidate.name,
       estimatedFloor,
     });
+
+    // AUTO-LISTING: try to list NFT on OpenSea via Seaport + Smart Account signing
+    // This is the "Option 3" full automation — bot creates the listing itself.
+    try {
+      const { createOpenSeaListing } = await import('@/lib/seaport');
+      const isErc1155 = mintLogs[0].topics?.[0] === TRANSFER_EVENT_TOPIC; // same event for ERC-721, but ERC-1155 uses different
+      const listingResult = await createOpenSeaListing({
+        nftContract: candidate.contract,
+        tokenId,
+        priceEth: listingPriceEth,
+        chainKey,
+        isErc1155: false, // ERC-721 by default (ERC-1155 auto-listing is harder)
+        collectionName: candidate.name,
+      });
+
+      if (listingResult.success) {
+        logActivity({
+          type: 'telegram_sent',
+          message: `NFT auto-listed on OpenSea at ${listingPriceEth} ETH`,
+          chain: chainKey,
+          contract: candidate.contract,
+        });
+      } else {
+        logActivity({
+          type: 'error',
+          message: `Auto-list failed: ${listingResult.error?.slice(0, 80)}`,
+          chain: chainKey,
+          contract: candidate.contract,
+        });
+      }
+    } catch (e: any) {
+      // Auto-listing is best-effort — don't fail the whole flow
+      logActivity({
+        type: 'error',
+        message: `Auto-list exception: ${e.message?.slice(0, 80)}`,
+        chain: chainKey,
+      });
+    }
   } catch (e) {
     // Don't throw — this is fire-and-forget
     console.error('[sniper] sendListingLinkAfterReceipt error:', e);
