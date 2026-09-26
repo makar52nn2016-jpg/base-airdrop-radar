@@ -23,7 +23,16 @@ import {
   getCollectionDetail,
 } from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
-import { recordScan, recordMintAttempt, recordMintSuccess, recordMintFailure } from '@/lib/stats';
+import {
+  recordScan,
+  recordMintAttempt,
+  recordMintSuccess,
+  recordMintFailure,
+  logScanStart,
+  logChainScan,
+  logCandidateFound,
+  logError,
+} from '@/lib/stats';
 import { notifyMintSuccess, notifyMintFailure, notifyListingLink } from '@/lib/telegram';
 import { checkContractQuality, isSpammyName } from '@/lib/quality';
 
@@ -146,7 +155,76 @@ export async function getSmartAccountAddressForChain(chainKey: ChainKey): Promis
  *
  * Returns up to `maxCandidates` candidates.
  */
+// Transfer event signature: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+const TRANSFER_EVENT_TOPIC =
+  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d';
+const ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+/**
+ * Strategy 0: Direct on-chain mint event scan via getLogs.
+ *
+ * For each chain, fetches ERC-721 Transfer events where from=0x0 (mint origin)
+ * over the last N blocks. This catches ALL mints on the chain, not just the
+ * ones OpenSea tracks. Returns candidates with detected free-mint functions.
+ *
+ * @param chainKey which chain to scan
+ * @param blockRange how many recent blocks to scan (default 50 = ~2 min on L2)
+ */
+async function scanRecentMintsViaLogs(
+  chainKey: ChainKey,
+  blockRange = 50
+): Promise<MintCandidate[]> {
+  const { publicClient: pc } = getClientsForChain(chainKey);
+  const chainConfig = CHAIN_CONFIGS[chainKey];
+
+  // Get latest block
+  const latestBlock = await pc.getBlockNumber();
+  const fromBlock = latestBlock - BigInt(blockRange);
+
+  // Fetch all Transfer(from=0x0, ...) logs in range
+  const logs = await pc.getLogs({
+    fromBlock,
+    toBlock: latestBlock,
+    topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
+  } as any);
+
+  // Get unique contract addresses (skip already-attempted)
+  const seenContracts = new Set<string>();
+  const candidates: MintCandidate[] = [];
+
+  for (const log of logs) {
+    if (!log.address) continue;
+    const contractAddress = log.address.toLowerCase();
+    if (seenContracts.has(contractAddress)) continue;
+    seenContracts.add(contractAddress);
+
+    // Try to detect free-mint function on this contract
+    const found = await findFreeMintFunction(contractAddress);
+    if (found) {
+      candidates.push({
+        slug: `chain-${chainKey}`,
+        name: `On-chain mint ${contractAddress.slice(0, 8)}`,
+        contract: contractAddress,
+        functionName: found.functionName,
+        args: found.args,
+        detectedAt: new Date().toISOString(),
+        image_url: null,
+        opensea_url: `https://opensea.io/assets/${chainConfig.openSeaChain}/${contractAddress}`,
+        source: found.source,
+        abiInputs: found.abiInputs,
+        chain: chainKey,
+      });
+    }
+
+    // Cap at 5 candidates per chain to avoid runaway
+    if (candidates.length >= 5) break;
+  }
+
+  return candidates;
+}
+
 export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidate[]> {
+  logScanStart();
   const candidates: MintCandidate[] = [];
   const tried = new Set<string>(); // dedup contract addresses within this scan
   const allScannedAddresses: string[] = [];
@@ -160,15 +238,37 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
     ethereum: 'ethereum',
   };
 
-  // Strategy 1: Recent mint events across ALL supported chains
+  // Strategy 0: Direct on-chain mint event scan via getLogs
+  // Catches ALL mints on each chain, not just the ones OpenSea tracks.
+  // This is the MOST comprehensive strategy — uses public RPC (free).
+  for (const chainKey of ALL_CHAINS) {
+    if (candidates.length >= maxCandidates) break;
+    try {
+      const chainCandidates = await scanRecentMintsViaLogs(chainKey, 50);
+      logChainScan(chainKey, chainCandidates.length);
+      for (const c of chainCandidates) {
+        if (candidates.length >= maxCandidates) break;
+        const dedupKey = `${chainKey}:${c.contract}`;
+        if (tried.has(dedupKey)) continue;
+        if (ATTEMPTED.has(dedupKey)) continue;
+        tried.add(dedupKey);
+        allScannedAddresses.push(c.contract);
+        candidates.push(c);
+        logCandidateFound(chainKey, c.contract, c.functionName);
+      }
+    } catch (err: any) {
+      logError(`Chain ${chainKey} scan failed: ${err.message?.slice(0, 80)}`);
+    }
+  }
+
+  // Strategy 1: Recent mint events from OpenSea API (across ALL supported chains)
   try {
     const events = await getRecentBaseTransfers(100, 6 * 3600); // last 6 hours
-    // Use new multi-chain filter — accepts events from base/optimism/arbitrum/polygon/ethereum
     const mintContracts = filterMintEventsForChains(events, [
       'base',
       'optimism',
       'arbitrum',
-      'matic', // polygon
+      'matic',
       'ethereum',
     ]);
 
@@ -288,10 +388,10 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
  * Topic0: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d
  * For mint: topics[1] (from) = 0x0000...0000
  * TokenId: topics[3] (big-endian uint256 as hex)
+ *
+ * Constants TRANSFER_EVENT_TOPIC and ZERO_ADDRESS_TOPIC are defined at top of file
+ * (used by scanRecentMintsViaLogs).
  */
-const TRANSFER_EVENT_TOPIC =
-  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d';
-const ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
 async function sendListingLinkAfterReceipt(
   txHash: string,
