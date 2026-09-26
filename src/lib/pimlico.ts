@@ -46,20 +46,22 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    rpcUrl: 'https://mainnet.base.org',
+    // Ankr — best reliability from Vercel datacenters
+    rpcUrl: 'https://rpc.ankr.com/base',
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: 'https://mainnet.optimism.io',
+    rpcUrl: 'https://rpc.ankr.com/optimism',
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
+    // Arb1 official RPC — already working, keep it
     rpcUrl: 'https://arb1.arbitrum.io/rpc',
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
@@ -67,16 +69,14 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   polygon: {
     key: 'polygon',
     chain: polygon,
-    // PublicNode — more reliable than Ankr for getLogs (Ankr rejects wildcard topic params)
-    rpcUrl: 'https://polygon-bor-rpc.publicnode.com',
+    rpcUrl: 'https://rpc.ankr.com/polygon',
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    // PublicNode — more reliable than Ankr for getLogs
-    rpcUrl: 'https://ethereum-rpc.publicnode.com',
+    rpcUrl: 'https://rpc.ankr.com/eth',
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },

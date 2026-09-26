@@ -189,19 +189,31 @@ async function scanRecentMintsViaLogs(
   const fromBlock = latestBlock - BigInt(blockRange);
 
   // Fetch all mint Transfer events in range — ERC-721 (from=0x0) AND ERC-1155
-  // Use null instead of undefined for wildcard topic positions (Ankr RPC requires null)
-  const [erc721Logs, erc1155SingleLogs] = await Promise.all([
-    pc.getLogs({
+  // ERC-721 has no wildcard in topics — works with ALL RPCs
+  // ERC-1155 has null wildcard — some RPCs (Ankr) may reject. Wrap in try/catch.
+  let erc721Logs: any[] = [];
+  let erc1155SingleLogs: any[] = [];
+
+  try {
+    erc721Logs = await pc.getLogs({
       fromBlock,
       toBlock: latestBlock,
       topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
-    } as any),
-    pc.getLogs({
+    } as any);
+  } catch (e: any) {
+    // ERC-721 is critical — if this fails, the whole chain scan fails
+    throw e;
+  }
+
+  try {
+    erc1155SingleLogs = await pc.getLogs({
       fromBlock,
       toBlock: latestBlock,
       topics: [ERC1155_TRANSFER_SINGLE_TOPIC, null, ZERO_ADDRESS_TOPIC],
-    } as any),
-  ]);
+    } as any);
+  } catch {
+    // ERC-1155 is bonus — if it fails (Ankr rejects null wildcard), continue with ERC-721 only
+  }
 
   // Get unique contract addresses from both event types
   const seenContracts = new Set<string>();
