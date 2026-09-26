@@ -171,16 +171,15 @@ const ERC1155_TRANSFER_BATCH_TOPIC =
 /**
  * Strategy 0: Direct on-chain mint event scan via getLogs.
  *
- * v2 — now scans BOTH ERC-721 AND ERC-1155 mint events. Catches ALL mints
- * on each chain (not just the ones OpenSea tracks). Block range increased
- * from 50 to 500 (~10-15 min on L2, ~1.5 hours on L1).
+ * v3 — reduced block range from 500 to 200 (was timing out Vercel 60s limit
+ * on 5-min cron). Now scans both ERC-721 AND ERC-1155 in parallel via Promise.all.
  *
  * @param chainKey which chain to scan
- * @param blockRange how many recent blocks to scan (default 500)
+ * @param blockRange how many recent blocks to scan (default 200 = ~5 min on L2)
  */
 async function scanRecentMintsViaLogs(
   chainKey: ChainKey,
-  blockRange = 500
+  blockRange = 200
 ): Promise<MintCandidate[]> {
   const { publicClient: pc } = getClientsForChain(chainKey);
   const chainConfig = CHAIN_CONFIGS[chainKey];
@@ -233,8 +232,8 @@ async function scanRecentMintsViaLogs(
       });
     }
 
-    // Cap at 10 candidates per chain to avoid runaway
-    if (candidates.length >= 10) break;
+    // Cap at 5 candidates per chain to avoid runaway (was 10, reduced for speed)
+    if (candidates.length >= 5) break;
   }
 
   return candidates;
@@ -257,30 +256,39 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
 
   // Strategy 0: Direct on-chain mint event scan via getLogs (ERC-721 + ERC-1155)
   // Catches ALL mints on each chain, not just the ones OpenSea tracks.
-  // Block range = 500 (~10-15 min on L2, ~1.5 hours on L1)
-  for (const chainKey of ALL_CHAINS) {
-    if (candidates.length >= maxCandidates) break;
+  // Block range = 200 (~5 min on L2, ~25 min on L1)
+  // Run all 5 chains IN PARALLEL via Promise.all — saves ~20s vs sequential
+  const chainScanPromises = ALL_CHAINS.map(async (chainKey): Promise<MintCandidate[]> => {
     try {
-      const chainCandidates = await scanRecentMintsViaLogs(chainKey); // uses default 500 blocks
+      const chainCandidates = await scanRecentMintsViaLogs(chainKey);
       logChainScan(chainKey, chainCandidates.length);
-      for (const c of chainCandidates) {
-        if (candidates.length >= maxCandidates) break;
-        const dedupKey = `${chainKey}:${c.contract}`;
-        if (tried.has(dedupKey)) continue;
-        // NOTE: Removed ATTEMPTED check — retry every scan cycle for max catch rate
-        tried.add(dedupKey);
-        allScannedAddresses.push(c.contract);
-        candidates.push(c);
-        logCandidateFound(chainKey, c.contract, c.functionName);
-      }
+      return chainCandidates;
     } catch (err: any) {
       logError(`Chain ${chainKey} scan failed: ${err.message?.slice(0, 80)}`);
+      return [];
     }
+  });
+
+  const chainResults = await Promise.all(chainScanPromises);
+
+  for (const chainCandidates of chainResults) {
+    for (const c of chainCandidates) {
+      if (candidates.length >= maxCandidates) break;
+      const dedupKey = `${c.chain}:${c.contract}`;
+      if (tried.has(dedupKey)) continue;
+      tried.add(dedupKey);
+      allScannedAddresses.push(c.contract);
+      candidates.push(c);
+      logCandidateFound(c.chain || 'unknown', c.contract, c.functionName);
+    }
+    if (candidates.length >= maxCandidates) break;
   }
 
   // Strategy 1: Recent mint events from OpenSea API (across ALL supported chains)
+  // Reduced from 300 to 100 events (single page) — Strategy 0 (on-chain getLogs)
+  // already catches all mints on each chain, OpenSea is redundant + slow.
   try {
-    const events = await getRecentBaseTransfers(100, 6 * 3600); // last 6 hours
+    const events = await getRecentBaseTransfers(100, 6 * 3600, 1); // 1 page = 100 events
     const mintContracts = filterMintEventsForChains(events, [
       'base',
       'optimism',
