@@ -74,12 +74,13 @@ export async function checkContractQuality(slug?: string): Promise<QualityCheckR
       return { isSpam: true, reason: 'No image and no description' };
     }
 
-    // Check 4 (NEW): floor = 0 AND supply > 1000 — clearly spam with no market
+    // Check 4 (NEW): floor = 0 AND supply > 10000 — clearly spam with no market
+    // (was 1000, lowered to 10000 for more permissive minting)
     const totalSupply = detail.contracts?.reduce((sum, c) => sum + (c.total_supply || 0), 0) || 0;
     const floorPrice = detail.floor_price ?? null;
-    const hasMarket = (floorPrice !== null && floorPrice > 0) || totalSupply < 1000;
+    const hasMarket = (floorPrice !== null && floorPrice > 0) || totalSupply < 10000;
 
-    if (floorPrice === 0 && totalSupply > 1000) {
+    if (floorPrice === 0 && totalSupply > 10000) {
       return {
         isSpam: true,
         reason: `No market (floor=0, supply=${totalSupply})`,

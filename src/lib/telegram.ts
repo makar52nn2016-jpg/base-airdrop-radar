@@ -24,20 +24,28 @@ export function isTelegramConfigured(): boolean {
  * Returns true on success, false on failure.
  *
  * Markdown is supported — use *bold*, _italic_, `code`, [links](url).
+ *
+ * @param replyMarkup optional inline keyboard markup
  */
-export async function sendTelegramMessage(text: string): Promise<boolean> {
+export async function sendTelegramMessage(
+  text: string,
+  replyMarkup?: any
+): Promise<boolean> {
   if (!isTelegramConfigured()) {
     return false;
   }
 
   try {
     const url = `${TELEGRAM_API_BASE}/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    const body = {
+    const body: any = {
       chat_id: TELEGRAM_CHAT_ID,
       text,
       parse_mode: 'Markdown',
       disable_web_page_preview: false,
     };
+    if (replyMarkup) {
+      body.reply_markup = replyMarkup;
+    }
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -46,7 +54,8 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
     });
 
     if (!resp.ok) {
-      console.error('[telegram] sendMessage failed:', await resp.text());
+      const errText = await resp.text();
+      console.error('[telegram] sendMessage failed:', resp.status, errText);
       return false;
     }
 
@@ -56,6 +65,41 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
     console.error('[telegram] error:', e);
     return false;
   }
+}
+
+/**
+ * Builds an inline keyboard with main bot actions.
+ */
+export function getMainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📊 Status', callback_data: '/status' },
+        { text: '🔍 Scan', callback_data: '/scan' },
+      ],
+      [
+        { text: '⚡ Run Cycle', callback_data: '/run' },
+        { text: '📜 Recent', callback_data: '/recent' },
+      ],
+      [
+        { text: '⛓ Chains', callback_data: '/chains' },
+        { text: '💰 Balance', callback_data: '/balance' },
+      ],
+      [
+        { text: '🌐 Open Dashboard', url: 'https://base-airdrop-radar.vercel.app/dashboard' },
+      ],
+    ],
+  };
+}
+
+/**
+ * Sends a message with the main menu inline keyboard.
+ */
+export async function sendMainMenu(extraText?: string): Promise<boolean> {
+  const text = extraText
+    ? `${extraText}\n\n👇 Tap a button below:`
+    : `🤖 *Base Sniper Bot*\n\nAuto-scans 5 chains (Base, Optimism, Arbitrum, Polygon, Ethereum) for free NFT mints every 5 minutes. Gasless via Pimlico Paymaster.\n\n👇 Tap a button below:`;
+  return sendTelegramMessage(text, getMainMenuKeyboard());
 }
 
 /**

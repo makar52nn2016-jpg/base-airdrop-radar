@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { sendTelegramMessage } from '@/lib/telegram';
+import { sendTelegramMessage, sendMainMenu, getMainMenuKeyboard } from '@/lib/telegram';
 import { getStats } from '@/lib/stats';
 import { getRecentMints, getSmartAccountAddress, getSmartAccountAddressForChain } from '@/lib/sniper';
 import { findFreeMintFunction } from '@/lib/basescan';
@@ -9,19 +9,11 @@ import { isPimlicoConfigured, ALL_CHAINS, CHAIN_CONFIGS, type ChainKey } from '@
 /**
  * Telegram bot webhook endpoint.
  *
- * Set webhook via:
- *   curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://base-airdrop-radar.vercel.app/api/telegram/webhook"
+ * Handles TWO types of updates:
+ *   1. message — text commands (/start, /scan, /mint 0xABC, etc.)
+ *   2. callback_query — inline button clicks (sends callback_data as the command)
  *
- * Supported commands (text the bot):
- *   /start     — welcome
- *   /help      — list commands
- *   /status    — bot config + smart account
- *   /scan      — trigger scan, return candidates count
- *   /run       — trigger full cycle (scan + mint)
- *   /recent    — last 10 mints
- *   /balance   — Smart Account address (balance via Etherscan later)
- *   /profit    — total earnings (placeholder until sales tracking)
- *   /mint 0xABC — manual mint of given contract
+ * Inline buttons are defined in getMainMenuKeyboard() — see src/lib/telegram.ts.
  */
 
 interface TelegramUpdate {
@@ -31,11 +23,44 @@ interface TelegramUpdate {
     chat: { id: number; type: string; first_name?: string; username?: string };
     text?: string;
   };
+  callback_query?: {
+    id: string;
+    data: string;
+    message: {
+      message_id: number;
+      chat: { id: number; type: string };
+    };
+  };
 }
 
 export async function POST(request: Request) {
+  let debugInfo: string[] = [];
   try {
     const update: TelegramUpdate = await request.json();
+
+    // Handle callback_query (inline button click)
+    if (update.callback_query) {
+      const callbackData = update.callback_query.data;
+      const chatId = update.callback_query.message.chat.id;
+
+      // Answer the callback (removes loading spinner on button)
+      await answerCallbackQuery(update.callback_query.id);
+
+      // Treat callback_data as a command
+      const command = callbackData.split(' ')[0].toLowerCase();
+      const args = callbackData.split(' ').slice(1).join(' ');
+      debugInfo.push(`callback: cmd=${command} args=${args}`);
+
+      const reply = await handleCommand(command, args);
+      const sent = await sendTelegramMessage(reply);
+      if (!sent) {
+        const plainReply = reply.replace(/\*/g, '').replace(/`/g, '').replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2');
+        await sendTelegramMessage(plainReply);
+        debugInfo.push('Markdown failed, sent plain text');
+      }
+
+      return NextResponse.json({ ok: true, debug: debugInfo });
+    }
 
     if (!update.message?.text) {
       return NextResponse.json({ ok: true });
@@ -47,38 +72,82 @@ export async function POST(request: Request) {
     // Restrict to configured chat ID only
     const configuredChatId = process.env.TELEGRAM_CHAT_ID;
     if (configuredChatId && String(chatId) !== configuredChatId) {
-      return NextResponse.json({ ok: true }); // ignore unauthorized
+      debugInfo.push(`Unauthorized chat_id=${chatId}, expected=${configuredChatId}`);
+      return NextResponse.json({ ok: true, debug: debugInfo });
     }
 
     const command = text.split(' ')[0].toLowerCase();
     const args = text.split(' ').slice(1).join(' ');
 
     const reply = await handleCommand(command, args);
-    await sendTelegramMessage(reply);
 
-    return NextResponse.json({ ok: true });
+    // For /start and /menu, send the inline keyboard
+    if (command === '/start' || command === '/menu') {
+      const sent = await sendMainMenu(command === '/start' ? '🤖 Bot ready!' : undefined);
+      debugInfo.push(`start/menu sent: ${sent}`);
+      return NextResponse.json({ ok: true, sent, debug: debugInfo });
+    }
+
+    // For other commands, send the reply with the main menu attached
+    const sent = await sendTelegramMessage(reply, getMainMenuKeyboard());
+    if (!sent) {
+      // Retry with plain text (no Markdown) — sometimes Markdown parsing fails
+      debugInfo.push('Markdown send failed, retrying as plain text');
+      const plainReply = reply.replace(/\*/g, '').replace(/`/g, '').replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2');
+      const sentPlain = await sendTelegramMessage(plainReply, getMainMenuKeyboard());
+      debugInfo.push(`Plain retry: ${sentPlain ? 'OK' : 'failed'}`);
+    }
+
+    return NextResponse.json({ ok: true, sent: true, debug: debugInfo });
   } catch (e: any) {
     console.error('[telegram/webhook] error:', e);
-    return NextResponse.json({ ok: true }); // always 200 to Telegram so it doesn't retry
+    // Try to send error to user
+    try {
+      await sendTelegramMessage(`❌ Bot error: ${e?.message?.slice(0, 200) || 'unknown'}`);
+    } catch {}
+    return NextResponse.json({ ok: true, error: e?.message?.slice(0, 200) });
   }
+}
+
+/**
+ * Answers a callback query — removes the loading spinner on the inline button.
+ */
+async function answerCallbackQuery(callbackId: string): Promise<void> {
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  if (!TELEGRAM_BOT_TOKEN) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackId }),
+    });
+  } catch {}
 }
 
 async function handleCommand(command: string, args: string): Promise<string> {
   switch (command) {
+    case '/menu':
+      return `👇 *Main menu buttons below*
+
+Tap any inline button to execute the action immediately:
+- 📊 Status — full bot stats
+- 🔍 Scan — trigger scan, returns candidates
+- ⚡ Run Cycle — scan + attempt mints
+- 📜 Recent — last 10 mints with tx hashes
+- ⛓ Chains — all 5 Smart Account addresses
+- 💰 Balance — Base Smart Account
+- 🌐 Open Dashboard — open web dashboard in browser`;
+
     case '/start':
       return `🤖 *Base Sniper Bot*
 
-Welcome! I'll send you notifications when the sniper bot mints NFTs.
+Welcome! I auto-scan 5 chains (Base, Optimism, Arbitrum, Polygon, Ethereum) for free NFT mints every 5 minutes. All mints are gasless via Pimlico Paymaster.
 
-*Commands:*
-/help — list commands
-/status — bot config + smart account
-/scan — trigger scan
-/run — trigger full cycle (scan + mint)
-/recent — last 10 mints
-/balance — Smart Account info
-/profit — total earnings (coming soon)
-/mint 0xABC — manual mint of given contract`;
+When a mint succeeds, I'll send you 2 messages:
+1. "Mint succeeded" with tx hash
+2. "Ready to list" with direct OpenSea sell URL (30s later)
+
+Tap any button below to control me:`;
 
     case '/help':
       return `*Commands:*
