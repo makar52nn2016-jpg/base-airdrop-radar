@@ -81,8 +81,29 @@ interface StatusResponse {
   next_actions: string;
 }
 
+interface PortfolioNFT {
+  identifier: string;
+  contract: string;
+  chain: string;
+  chain_key?: string;
+  name: string | null;
+  description: string | null;
+  image_url: string | null;
+  collection: string;
+  collection_name: string | null;
+  opensea_url: string | null;
+  token_standard: string | null;
+}
+
+interface PortfolioResponse {
+  total_nfts: number;
+  per_chain: Record<string, PortfolioNFT[]>;
+  all_nfts: PortfolioNFT[];
+}
+
 export default function DashboardPage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<string>('');
   const [scanLoading, setScanLoading] = useState(false);
@@ -104,19 +125,34 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const fetchPortfolio = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/sniper/portfolio', { cache: 'no-store' });
+      const data = await resp.json();
+      setPortfolio(data);
+    } catch (e) {
+      console.error('fetchPortfolio error', e);
+    }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 5000); // every 5s — real-time feel
-    return () => clearInterval(interval);
-  }, [fetchStatus]);
+    fetchPortfolio();
+    const statusInterval = setInterval(fetchStatus, 5000); // every 5s
+    const portfolioInterval = setInterval(fetchPortfolio, 30000); // every 30s (slower, OpenSea API)
+    return () => {
+      clearInterval(statusInterval);
+      clearInterval(portfolioInterval);
+    };
+  }, [fetchStatus, fetchPortfolio]);
 
   const triggerScan = async () => {
     setScanLoading(true);
     try {
       const resp = await fetch('/api/sniper/scan?max=20', { cache: 'no-store' });
       const data = await resp.json();
-      // No alert — just refresh, dashboard will show real-time updates
       fetchStatus();
+      fetchPortfolio(); // refresh portfolio after scan
     } catch (e) {
       console.error('scan error', e);
     } finally {
@@ -130,6 +166,7 @@ export default function DashboardPage() {
       const resp = await fetch('/api/sniper/run', { cache: 'no-store' });
       const data = await resp.json();
       fetchStatus();
+      fetchPortfolio(); // refresh portfolio after run
     } catch (e) {
       console.error('run error', e);
     } finally {
@@ -151,6 +188,7 @@ export default function DashboardPage() {
       const data = await resp.json();
       setManualResult(data);
       fetchStatus();
+      fetchPortfolio(); // refresh portfolio after manual mint
     } catch (e) {
       setManualResult({ success: false, error: 'Request failed' });
     } finally {
@@ -316,15 +354,52 @@ export default function DashboardPage() {
               {(!status.activity_log || status.activity_log.length === 0) ? (
                 <div className="text-center py-6 text-[#5a6178]">
                   <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">No activity yet.</p>
-                  <p className="text-xs mt-1">
-                    Trigger a scan to see live events as they happen.
+                  <p className="text-sm">No activity yet (cold start — fresh Vercel instance).</p>
+                  <p className="text-xs mt-1 text-[#5a6178]">
+                    cron-job.org every 5 min keeps instance warm. Click Trigger Scan to populate.
                   </p>
                 </div>
               ) : (
                 <div className="space-y-1.5 max-h-96 overflow-y-auto">
                   {status.activity_log.map((ev, i) => (
                     <ActivityRow key={i} event={ev} />
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </section>
+
+      {/* NFT Portfolio (REAL on-chain data — persistent across cold starts) */}
+      <section className="py-3">
+        <div className="container mx-auto px-4 sm:px-6 max-w-6xl">
+          <Card className="bg-[#13151f] border-[#1f2233]">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <Coins className="w-4 h-4 text-[#2081e2]" />
+                  NFT Portfolio
+                </span>
+                <Badge variant="secondary" className="text-[10px] font-mono bg-[#1f2233] text-[#7a8295]">
+                  {portfolio?.total_nfts || 0} NFTs · 5 chains
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {!portfolio || portfolio.total_nfts === 0 ? (
+                <div className="text-center py-8 text-[#5a6178]">
+                  <Coins className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">No NFTs in portfolio yet.</p>
+                  <p className="text-xs mt-1 text-[#5a6178]">
+                    Bot is scanning 5 chains every 5 min for free mints. When found,
+                    NFTs will appear here automatically (refreshes every 30s).
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {portfolio.all_nfts.map((nft, i) => (
+                    <PortfolioCard key={i} nft={nft} />
                   ))}
                 </div>
               )}
@@ -532,6 +607,49 @@ function MintRow({ mint }: { mint: StatusResponse['recent_mints'][number] }) {
         )}
       </div>
     </div>
+  );
+}
+
+function PortfolioCard({ nft }: { nft: PortfolioNFT }) {
+  const chain = nft.chain_key || nft.chain;
+  return (
+    <a
+      href={nft.opensea_url || '#'}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block bg-[#0a0b14] border border-[#1f2233] rounded-md overflow-hidden hover:border-[#2a2e44] transition-colors"
+    >
+      <div className="aspect-square bg-[#1a1d2e] flex items-center justify-center overflow-hidden">
+        {nft.image_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={nft.image_url}
+            alt={nft.name || 'NFT'}
+            className="w-full h-full object-cover"
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = 'none';
+            }}
+          />
+        ) : (
+          <Coins className="w-8 h-8 text-[#5a6178]" />
+        )}
+      </div>
+      <div className="p-2 space-y-1">
+        <div className="text-xs font-semibold truncate text-white">
+          {nft.name || nft.collection_name || `Token #${nft.identifier.slice(0, 8)}`}
+        </div>
+        <div className="flex items-center justify-between gap-1">
+          <Badge variant="secondary" className="text-[9px] font-mono bg-[#1f2233] text-[#7a8295]">
+            {chain}
+          </Badge>
+          {nft.token_standard && (
+            <span className="text-[9px] text-[#5a6178] font-mono">
+              {nft.token_standard}
+            </span>
+          )}
+        </div>
+      </div>
+    </a>
   );
 }
 
