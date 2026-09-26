@@ -196,6 +196,46 @@ export function filterBaseMintEvents(events: OpenSeaEvent[]): { contract: string
 }
 
 /**
+ * Fetches contract info by address (returns the collection slug + metadata).
+ *
+ * Useful when we only have a contract address (from events) and need the
+ * collection slug to call other endpoints.
+ *
+ * Endpoint: GET /api/v2/asset_contract/{address}
+ */
+export interface AssetContractInfo {
+  address: string;
+  chain: string;
+  collection: string; // slug
+  token_standard: string;
+  name: string;
+  description: string | null;
+  image_url: string | null;
+  safelist_status: string;
+}
+
+export async function getAssetContractInfo(address: string): Promise<AssetContractInfo | null> {
+  if (!OPENSEA_API_KEY) return null;
+
+  const url = `${OPENSEA_BASE_URL}/asset_contract/${address.toLowerCase()}`;
+
+  const response = await fetch(url, {
+    headers: {
+      'X-API-KEY': OPENSEA_API_KEY,
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    return null;
+  }
+
+  return (await response.json()) as AssetContractInfo;
+}
+
+/**
  * Fetches a single collection's full details (including contracts).
  */
 export async function getCollectionDetail(slug: string): Promise<OpenSeaCollectionDetail | null> {

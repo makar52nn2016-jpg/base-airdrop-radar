@@ -10,10 +10,12 @@ import {
   getCollectionContracts,
   getRecentBaseTransfers,
   filterBaseMintEvents,
+  getAssetContractInfo,
 } from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
 import { recordScan, recordMintAttempt, recordMintSuccess, recordMintFailure } from '@/lib/stats';
 import { notifyMintSuccess, notifyMintFailure } from '@/lib/telegram';
+import { checkContractQuality, isSpammyName } from '@/lib/quality';
 
 /**
  * Core sniper logic.
@@ -122,16 +124,36 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
       tried.add(contractAddress);
       allScannedAddresses.push(contractAddress);
 
+      // Quality check: get contract info from OpenSea, check for spam
+      let actualSlug = slug;
+      let collectionName: string | undefined;
+      let collectionImageUrl: string | null = null;
+      if (!actualSlug) {
+        try {
+          const info = await getAssetContractInfo(contractAddress);
+          if (info) {
+            actualSlug = info.collection;
+            collectionName = info.name;
+            collectionImageUrl = info.image_url;
+            if (isSpammyName(info.name || '')) {
+              continue; // skip spam
+            }
+          }
+        } catch {
+          // OpenSea lookup failed — continue without it
+        }
+      }
+
       const found = await findFreeMintFunction(contractAddress);
       if (found) {
         candidates.push({
-          slug: slug || 'recent-mint',
-          name: `Recent mint ${contractAddress.slice(0, 8)}`,
+          slug: actualSlug || 'recent-mint',
+          name: collectionName || `Recent mint ${contractAddress.slice(0, 8)}`,
           contract: contractAddress,
           functionName: found.functionName,
           args: found.args,
           detectedAt: new Date().toISOString(),
-          image_url: null,
+          image_url: collectionImageUrl,
           opensea_url: `https://opensea.io/assets/base/${contractAddress}`,
           source: found.source,
           abiInputs: found.abiInputs,
