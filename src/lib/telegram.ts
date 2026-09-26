@@ -86,6 +86,10 @@ export function getMainMenuKeyboard() {
         { text: '💰 Balance', callback_data: '/balance' },
       ],
       [
+        { text: '🖼 Portfolio', callback_data: '/portfolio' },
+        { text: '🩺 Health Check', callback_data: '/health' },
+      ],
+      [
         { text: '🌐 Open Dashboard', url: 'https://base-airdrop-radar.vercel.app/dashboard' },
       ],
     ],

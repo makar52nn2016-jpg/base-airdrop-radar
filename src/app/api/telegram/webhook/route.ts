@@ -4,7 +4,15 @@ import { getStats } from '@/lib/stats';
 import { getRecentMints, getSmartAccountAddress, getSmartAccountAddressForChain } from '@/lib/sniper';
 import { findFreeMintFunction } from '@/lib/basescan';
 import { executeMint } from '@/lib/sniper';
-import { isPimlicoConfigured, ALL_CHAINS, CHAIN_CONFIGS, type ChainKey } from '@/lib/pimlico';
+import {
+  isPimlicoConfigured,
+  ALL_CHAINS,
+  CHAIN_CONFIGS,
+  getClientsForChain,
+  type ChainKey,
+} from '@/lib/pimlico';
+import { isOpenSeaConfigured, getAccountNFTs } from '@/lib/opensea';
+import { isTelegramConfigured } from '@/lib/telegram';
 
 /**
  * Telegram bot webhook endpoint.
@@ -260,6 +268,129 @@ Address: \`${smartAccount}\`
 
 🔗 [View on OpenSea](https://opensea.io/${smartAccount})
 🔗 [View on Basescan](https://basescan.org/address/${smartAccount})`;
+    }
+
+    case '/portfolio': {
+      try {
+        let totalNFTs = 0;
+        const lines: string[] = ['🖼 *NFT Portfolio*'];
+
+        for (const chainKey of ALL_CHAINS) {
+          try {
+            const addr = await getSmartAccountAddressForChain(chainKey);
+            const config = CHAIN_CONFIGS[chainKey];
+            const nfts = await getAccountNFTs(addr, config.openSeaChain, 50);
+            if (nfts.length > 0) {
+              totalNFTs += nfts.length;
+              lines.push(`\n*${chainKey}*: ${nfts.length} NFTs`);
+              for (const nft of nfts.slice(0, 3)) {
+                const name = nft.name || nft.collection_name || `Token #${nft.identifier.slice(0, 8)}`;
+                lines.push(`  • [${name}](${nft.opensea_url})`);
+              }
+              if (nfts.length > 3) lines.push(`  • ... and ${nfts.length - 3} more`);
+            }
+          } catch {}
+        }
+
+        lines.push(`\n📊 *Total NFTs across all 5 chains:* ${totalNFTs}`);
+        lines.push(`\n🌐 [View Base wallet on OpenSea](https://opensea.io/${await getSmartAccountAddress()})`);
+        return lines.join('\n');
+      } catch (e: any) {
+        return `❌ Portfolio fetch failed: ${e.message?.slice(0, 200)}`;
+      }
+    }
+
+    case '/health': {
+      const checks: string[] = [];
+      let allOk = true;
+
+      // 1. Check env vars
+      const pimlico = isPimlicoConfigured();
+      if (pimlico.configured) {
+        checks.push('✅ Pimlico API Key configured');
+      } else {
+        checks.push(`❌ Pimlico missing: ${pimlico.missing.join(', ')}`);
+        allOk = false;
+      }
+
+      if (isOpenSeaConfigured()) {
+        checks.push('✅ OpenSea API Key configured');
+      } else {
+        checks.push('❌ OpenSea API Key missing');
+        allOk = false;
+      }
+
+      if (isTelegramConfigured()) {
+        checks.push('✅ Telegram Bot configured');
+      } else {
+        checks.push('❌ Telegram Bot missing');
+        allOk = false;
+      }
+
+      // 2. Check Smart Account initialization on Base
+      try {
+        const addr = await getSmartAccountAddress();
+        checks.push(`✅ Smart Account: \`${addr.slice(0, 12)}...\``);
+      } catch (e: any) {
+        checks.push(`❌ Smart Account init failed: ${e.message?.slice(0, 80)}`);
+        allOk = false;
+      }
+
+      // 3. Check each chain's RPC connectivity (fast eth_chainId check)
+      for (const chainKey of ALL_CHAINS) {
+        try {
+          const { publicClient: pc } = getClientsForChain(chainKey);
+          const blockNumber = await pc.getBlockNumber();
+          checks.push(`✅ ${chainKey} RPC: block #${blockNumber}`);
+        } catch (e: any) {
+          checks.push(`❌ ${chainKey} RPC failed: ${e.message?.slice(0, 60)}`);
+          allOk = false;
+        }
+      }
+
+      // 4. Check Vercel instance state
+      const stats = getStats();
+      const uptime = stats.firstRunAt
+        ? Math.round((Date.now() - new Date(stats.firstRunAt).getTime()) / 1000)
+        : 0;
+      checks.push(`✅ Instance uptime: ${uptime}s`);
+      checks.push(`✅ Total scans: ${stats.totalScans}`);
+      checks.push(`✅ Mints attempted: ${stats.totalMintsAttempted} (✓${stats.totalMintsSucceeded} ✗${stats.totalMintsFailed})`);
+
+      // 5. Check OpenSea API (fast collection list call)
+      try {
+        const resp = await fetch('https://api.opensea.io/api/v2/collections?chain=base&limit=1', {
+          headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY || '' },
+          cache: 'no-store',
+        });
+        if (resp.ok) {
+          checks.push('✅ OpenSea API responding');
+        } else {
+          checks.push(`⚠️ OpenSea API: ${resp.status}`);
+          allOk = false;
+        }
+      } catch {
+        checks.push('❌ OpenSea API unreachable');
+        allOk = false;
+      }
+
+      // 6. Check cron-job.org last ping (approximation: if lastScanAt > 10 min ago, warn)
+      if (stats.lastScanAt) {
+        const scanAge = Math.round((Date.now() - new Date(stats.lastScanAt).getTime()) / 60000);
+        if (scanAge < 10) {
+          checks.push(`✅ Last cron scan: ${scanAge} min ago`);
+        } else {
+          checks.push(`⚠️ Last scan: ${scanAge} min ago (check cron-job.org)`);
+        }
+      } else {
+        checks.push('⚠️ No scans yet on this instance (cold start or cron not running)');
+      }
+
+      const header = allOk
+        ? '🟢 *ALL SYSTEMS OPERATIONAL*'
+        : '🔴 *SOME CHECKS FAILED — see below*';
+
+      return `${header}\n\n${checks.join('\n')}\n\n_Last health check: ${new Date().toISOString()}_`;
     }
 
     case '/chains': {
