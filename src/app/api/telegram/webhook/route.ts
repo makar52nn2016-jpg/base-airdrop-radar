@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import { sendTelegramMessage } from '@/lib/telegram';
 import { getStats } from '@/lib/stats';
-import { getRecentMints, getSmartAccountAddress } from '@/lib/sniper';
+import { getRecentMints, getSmartAccountAddress, getSmartAccountAddressForChain } from '@/lib/sniper';
 import { findFreeMintFunction } from '@/lib/basescan';
 import { executeMint } from '@/lib/sniper';
-import { isPimlicoConfigured } from '@/lib/pimlico';
+import { isPimlicoConfigured, ALL_CHAINS, CHAIN_CONFIGS, type ChainKey } from '@/lib/pimlico';
 
 /**
  * Telegram bot webhook endpoint.
@@ -82,11 +82,12 @@ Welcome! I'll send you notifications when the sniper bot mints NFTs.
 
     case '/help':
       return `*Commands:*
-/status — bot config + smart account
+/status — bot config + smart account + stats
 /scan — trigger scan, returns candidates count
 /run — full cycle (scan + mint)
 /recent — last 10 mints
-/balance — Smart Account address
+/balance — Smart Account address (Base)
+/chains — all 5 Smart Account addresses (base/optimism/arbitrum/polygon/ethereum)
 /mint 0xABC123... — manual mint via gasless smart account
 /profit — total earnings (TBD)`;
 
@@ -184,12 +185,28 @@ ${
       try {
         smartAccount = await getSmartAccountAddress();
       } catch {}
-      return `💰 *Smart Account*
+      return `💰 *Smart Account (Base)*
 
 Address: \`${smartAccount}\`
 
 🔗 [View on OpenSea](https://opensea.io/${smartAccount})
 🔗 [View on Basescan](https://basescan.org/address/${smartAccount})`;
+    }
+
+    case '/chains': {
+      const lines: string[] = ['⛓ *Smart Accounts per chain*'];
+      for (const chainKey of ALL_CHAINS) {
+        try {
+          const addr = await getSmartAccountAddressForChain(chainKey);
+          const config = CHAIN_CONFIGS[chainKey];
+          lines.push(
+            `\n*${chainKey}* (\`${config.chain.id}\`)\n  \`${addr}\`\n  [OpenSea](https://opensea.io/${addr}) · [Scanner](${config.scannerUrl}/address/${addr})`
+          );
+        } catch (e: any) {
+          lines.push(`\n*${chainKey}*: init failed — ${e.message?.slice(0, 80)}`);
+        }
+      }
+      return lines.join('\n');
     }
 
     case '/profit':
