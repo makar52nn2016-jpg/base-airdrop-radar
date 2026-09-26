@@ -170,7 +170,7 @@ export function getStats() {
  * Called after each state change (scan, mint, activity event).
  */
 let lastSyncTime = 0;
-const SYNC_INTERVAL_MS = 5000; // sync at most every 5s to avoid spamming Supabase
+const SYNC_INTERVAL_MS = 1000; // sync at most every 1s (was 5s — too slow for fast scans)
 
 export function syncToSupabase() {
   const now = Date.now();
