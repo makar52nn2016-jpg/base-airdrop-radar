@@ -46,36 +46,37 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    // DRPC — free, no API key, supports address-less getLogs on ALL chains
-    rpcUrl: 'https://base.drpc.org',
+    // Pimlico as RPC provider — already works from Vercel (used for Smart Account)
+    // Supports eth_getLogs, eth_blockNumber, and all standard JSON-RPC methods
+    rpcUrl: `https://api.pimlico.io/v2/base/rpc?apikey=${PIMLICO_API_KEY}`,
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: 'https://optimism.drpc.org',
+    rpcUrl: `https://api.pimlico.io/v2/optimism/rpc?apikey=${PIMLICO_API_KEY}`,
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
-    rpcUrl: 'https://arbitrum.drpc.org',
+    rpcUrl: `https://api.pimlico.io/v2/arbitrum/rpc?apikey=${PIMLICO_API_KEY}`,
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
   },
   polygon: {
     key: 'polygon',
     chain: polygon,
-    rpcUrl: 'https://polygon.drpc.org',
+    rpcUrl: `https://api.pimlico.io/v2/polygon/rpc?apikey=${PIMLICO_API_KEY}`,
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    rpcUrl: 'https://eth.drpc.org',
+    rpcUrl: `https://api.pimlico.io/v2/ethereum/rpc?apikey=${PIMLICO_API_KEY}`,
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },
