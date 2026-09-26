@@ -19,11 +19,5 @@
       "memory": 512,
       "maxDuration": 60
     }
-  },
-  "crons": [
-    {
-      "path": "/api/sniper/run",
-      "schedule": "0 * * * *"
-    }
-  ]
+  }
 }
