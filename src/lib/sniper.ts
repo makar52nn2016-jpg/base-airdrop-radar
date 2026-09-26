@@ -34,6 +34,10 @@ export interface MintCandidate {
   detectedAt: string;
   image_url: string | null;
   opensea_url: string;
+  /** Source of mint-function detection: 'basescan' (verified ABI) | 'fallback' (hardcoded) */
+  source?: 'basescan' | 'fallback';
+  /** Function inputs from Basescan ABI (used to build correct ABI for writeContract) */
+  abiInputs?: any[];
 }
 
 export interface MintResult {
@@ -128,6 +132,8 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
           detectedAt: new Date().toISOString(),
           image_url: null,
           opensea_url: `https://opensea.io/assets/base/${contractAddress}`,
+          source: found.source,
+          abiInputs: found.abiInputs,
         });
       }
     }
@@ -162,6 +168,8 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
               detectedAt: new Date().toISOString(),
               image_url: col.image_url,
               opensea_url: col.opensea_url,
+              source: found.source,
+              abiInputs: found.abiInputs,
             });
           }
         }
@@ -193,13 +201,29 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
   try {
     const { smartAccountClient, smartAccountAddress } = await initSmartAccount();
 
+    // Build the right ABI for the call:
+    // - If we have Basescan-detected inputs, build a minimal ABI for just that function
+    // - Otherwise use the hardcoded FREE_MINT_ABI (which has all standard signatures)
+    let abi: any;
+    if (Array.isArray(candidate.abiInputs)) {
+      abi = [
+        {
+          type: 'function',
+          name: candidate.functionName,
+          inputs: candidate.abiInputs,
+          outputs: [],
+          stateMutability: 'nonpayable',
+        },
+      ];
+    } else {
+      abi = FREE_MINT_ABI;
+    }
+
     const txHash = await smartAccountClient.writeContract({
       address: candidate.contract as `0x${string}`,
-      abi: FREE_MINT_ABI,
+      abi,
       functionName: candidate.functionName,
       args: candidate.args as any[],
-      // Paymaster automatically sponsors gas — no `value` field needed even for paid mints
-      // if policy allows; for free mints there's no value anyway.
     });
 
     const result: MintResult = {

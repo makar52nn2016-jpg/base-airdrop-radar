@@ -143,13 +143,145 @@ export async function looksLikeContract(address: string): Promise<boolean> {
  * Tries to call a mint function on the contract with a static call first
  * (no gas spent) to see if it would succeed.
  *
- * v2 — tries 60+ function name + arg combinations.
- * Uses a "real" address (the configured recipient) for to-args to maximize
- * chance of success on contracts that require non-zero address.
+ * v3 — now uses Basescan verified ABI (if available) to find ALL functions
+ * whose name contains mint-like keywords (mint, claim, airdrop, gift, drop,
+ * give, grant, send, receive). This catches custom names like `mintPhase1`,
+ * `claimWhitelist`, `airdropV2`, etc.
  *
- * Returns the function name + args if it works, null otherwise.
+ * Falls back to hardcoded 60+ candidates if no verified ABI.
+ *
+ * Returns the function name + args if a callable function is found.
  */
 export async function findFreeMintFunction(
+  contractAddress: string
+): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback'; abiInputs?: any[] } | null> {
+  // Try Basescan ABI first (catches ALL custom function names)
+  const basescanResult = await findFreeMintViaBasescanAbi(contractAddress);
+  if (basescanResult) {
+    return { ...basescanResult, source: 'basescan' };
+  }
+
+  // Fallback: hardcoded 60+ candidates
+  const fallbackResult = await findFreeMintViaFallback(contractAddress);
+  if (fallbackResult) {
+    return { ...fallbackResult, source: 'fallback' };
+  }
+
+  return null;
+}
+
+/**
+ * Uses Basescan verified ABI to find any mint-like function.
+ * Catches custom names like mintPhase1, claimWhitelist, airdropV2.
+ */
+async function findFreeMintViaBasescanAbi(
+  contractAddress: string
+): Promise<{ functionName: string; args: unknown[]; abiInputs: any[] } | null> {
+  const abi = await getContractAbi(contractAddress);
+  if (!abi || !Array.isArray(abi)) return null;
+
+  // Find all functions whose name contains a mint-like keyword
+  // AND that are NOT payable (no ETH required = free mint candidate)
+  const MINT_KEYWORDS = [
+    'mint',
+    'claim',
+    'airdrop',
+    'gift',
+    'drop',
+    'give',
+    'grant',
+    'sendnft',
+    'receivenft',
+    'free',
+  ];
+
+  const candidates: { functionName: string; inputs: any[] }[] = [];
+  for (const item of abi) {
+    if (item.type !== 'function') continue;
+    if (item.stateMutability === 'payable') continue; // skip paid mints
+
+    const nameLower = (item.name || '').toLowerCase();
+    const isMintLike = MINT_KEYWORDS.some((kw) => nameLower.includes(kw));
+    if (!isMintLike) continue;
+
+    candidates.push({ functionName: item.name, inputs: item.inputs || [] });
+  }
+
+  if (candidates.length === 0) return null;
+
+  // For each candidate, build args based on input types and try static-call
+  const toAddress = (process.env.PROCEEDS_ADDRESS ||
+    '0x0000000000000000000000000000000000000001') as `0x${string}`;
+
+  for (const c of candidates) {
+    // Build args from input types
+    const args: unknown[] = [];
+    let skipCandidate = false;
+
+    for (const input of c.inputs) {
+      const t = input.type;
+      if (t === 'address') {
+        args.push(toAddress);
+      } else if (t === 'uint256' || t === 'uint128' || t === 'uint64' || t === 'uint32') {
+        args.push(1n);
+      } else if (t === 'uint16' || t === 'uint8') {
+        args.push(1);
+      } else if (t === 'bool') {
+        args.push(true);
+      } else if (t === 'string') {
+        args.push('');
+      } else if (t === 'bytes' || t.startsWith('bytes')) {
+        args.push('0x');
+      } else if (t.startsWith('uint')) {
+        args.push(1n);
+      } else if (t.startsWith('int')) {
+        args.push(1n);
+      } else {
+        // Unknown type — can't safely call
+        skipCandidate = true;
+        break;
+      }
+    }
+
+    if (skipCandidate) continue;
+
+    try {
+      // Build a minimal ABI for just this function
+      const fnAbi = [
+        {
+          type: 'function',
+          name: c.functionName,
+          inputs: c.inputs,
+          outputs: [{ type: 'uint256', name: '' }],
+          stateMutability: 'nonpayable',
+        },
+      ];
+
+      const contract = getContract({
+        address: contractAddress as `0x${string}`,
+        abi: fnAbi as any,
+        client: publicClient,
+      });
+
+      const fn = (contract as any)[c.functionName];
+      if (!fn) continue;
+
+      await fn.read.staticCall(args);
+      return { functionName: c.functionName, args, abiInputs: c.inputs };
+    } catch {
+      // Function reverts or doesn't exist via this signature — try next
+      continue;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Fallback: tries 60+ hardcoded function name + arg combinations.
+ * Used when Basescan ABI is not available or contract is unverified.
+ */
+async function findFreeMintViaFallback(
   contractAddress: string
 ): Promise<{ functionName: string; args: unknown[] } | null> {
   // Use a non-zero address for to-args (some contracts revert on zero address)
@@ -214,14 +346,9 @@ export async function findFreeMintFunction(
     try {
       const fn = (contract as any)[candidate.functionName];
       if (!fn) continue;
-
-      // Static call (no gas spent, no state change)
       await fn.read.staticCall(candidate.args);
-
-      // If we got here without throwing, the function exists and is callable
       return candidate;
     } catch {
-      // Function doesn't exist or reverts — try next
       continue;
     }
   }
