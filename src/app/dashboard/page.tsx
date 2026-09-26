@@ -19,17 +19,39 @@ import {
   Search,
   Wallet,
   XCircle,
+  Zap,
 } from 'lucide-react';
+
+interface ActivityEvent {
+  ts: string;
+  type:
+    | 'scan_start'
+    | 'scan_complete'
+    | 'candidate_found'
+    | 'mint_attempt'
+    | 'mint_success'
+    | 'mint_failure'
+    | 'chain_scan'
+    | 'telegram_sent'
+    | 'error';
+  message: string;
+  chain?: string;
+  contract?: string;
+  txHash?: string;
+}
 
 interface StatusResponse {
   timestamp: string;
   config: {
     pimlico: { configured: boolean; missing_env_vars: string[] };
     opensea: { configured: boolean };
+    telegram: { configured: boolean };
     smart_account_address: string | null;
     smart_account_opensea_url: string | null;
     smart_account_basescan_url: string | null;
   };
+  bot_state: 'idle' | 'scanning' | 'minting';
+  current_chain: string | null;
   stats: {
     totalScans: number;
     totalCandidatesDetected: number;
@@ -43,9 +65,10 @@ interface StatusResponse {
     success_rate: number;
     uptime_since: string;
     scannedContracts: string[];
+    activityLog: ActivityEvent[];
   };
   recent_mints: Array<{
-    candidate: { slug: string; name: string; contract: string; opensea_url: string };
+    candidate: { slug: string; name: string; contract: string; opensea_url: string; chain?: string };
     success: boolean;
     txHash?: string;
     smartAccountAddress?: string;
@@ -54,6 +77,8 @@ interface StatusResponse {
   recent_mints_count: number;
   scanned_contracts_count: number;
   last_scanned_contracts: string[];
+  activity_log: ActivityEvent[];
+  next_actions: string;
 }
 
 export default function DashboardPage() {
@@ -81,19 +106,19 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 30000); // every 30 sec
+    const interval = setInterval(fetchStatus, 5000); // every 5s — real-time feel
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
   const triggerScan = async () => {
     setScanLoading(true);
     try {
-      const resp = await fetch('/api/sniper/scan?max=10', { cache: 'no-store' });
+      const resp = await fetch('/api/sniper/scan?max=20', { cache: 'no-store' });
       const data = await resp.json();
-      alert(`Scan complete: ${data.candidates?.length || 0} candidates found`);
+      // No alert — just refresh, dashboard will show real-time updates
       fetchStatus();
     } catch (e) {
-      alert('Scan failed');
+      console.error('scan error', e);
     } finally {
       setScanLoading(false);
     }
@@ -104,11 +129,9 @@ export default function DashboardPage() {
     try {
       const resp = await fetch('/api/sniper/run', { cache: 'no-store' });
       const data = await resp.json();
-      const count = data.results?.length || 0;
-      alert(`Cycle complete: ${count} mints attempted. Check status for results.`);
       fetchStatus();
     } catch (e) {
-      alert('Run failed');
+      console.error('run error', e);
     } finally {
       setRunLoading(false);
     }
@@ -145,12 +168,14 @@ export default function DashboardPage() {
 
   const stats = status.stats;
   const accountUrl = status.config.smart_account_opensea_url;
+  const isScanning = status.bot_state === 'scanning';
+  const isMinting = status.bot_state === 'minting';
 
   return (
     <main className="min-h-screen bg-[#0a0b14] text-white">
       {/* Header */}
       <header className="border-b border-[#1f2233] bg-gradient-to-b from-[#0d1020] to-[#0a0b14]">
-        <div className="container mx-auto px-4 sm:px-6 py-6 max-w-6xl">
+        <div className="container mx-auto px-4 sm:px-6 py-4 max-w-6xl">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#0052ff] to-[#00d4ff] flex items-center justify-center text-xl font-bold">
@@ -158,24 +183,31 @@ export default function DashboardPage() {
               </div>
               <div>
                 <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight">
-                  Base Airdrop Sniper
+                  Base Sniper
                 </h1>
                 <div className="text-xs text-[#5a6178] font-mono">
-                  Live dashboard · Last update: {lastUpdate || 'never'}
+                  Live · Last update: {lastUpdate || 'never'} · Auto-refresh 5s
                 </div>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Badge
-                variant="secondary"
-                className={`text-xs font-mono ${
-                  status.config.pimlico.configured
-                    ? 'bg-[#0a3a2a] text-[#00ff88]'
-                    : 'bg-[#3a0a0a] text-[#ff0088]'
-                }`}
-              >
-                {status.config.pimlico.configured ? '● ONLINE' : '● OFFLINE'}
-              </Badge>
+              {/* Live state indicator */}
+              {isScanning ? (
+                <Badge className="text-xs font-mono bg-[#0052ff]/20 text-[#00d4ff] border border-[#0052ff]/40">
+                  <span className="inline-block w-2 h-2 rounded-full bg-[#00d4ff] mr-1.5 animate-pulse" />
+                  SCANNING {status.current_chain || ''}
+                </Badge>
+              ) : isMinting ? (
+                <Badge className="text-xs font-mono bg-[#ffaa00]/20 text-[#ffaa00] border border-[#ffaa00]/40">
+                  <span className="inline-block w-2 h-2 rounded-full bg-[#ffaa00] mr-1.5 animate-pulse" />
+                  MINTING
+                </Badge>
+              ) : (
+                <Badge className="text-xs font-mono bg-[#1f2233] text-[#7a8295] border border-[#2a2e44]">
+                  <span className="inline-block w-2 h-2 rounded-full bg-[#5a6178] mr-1.5" />
+                  IDLE
+                </Badge>
+              )}
               <Button
                 size="sm"
                 variant="outline"
@@ -191,7 +223,7 @@ export default function DashboardPage() {
 
       {/* Smart Account Banner */}
       <section className="border-b border-[#1f2233] bg-[#0d1020]">
-        <div className="container mx-auto px-4 sm:px-6 py-4 max-w-6xl">
+        <div className="container mx-auto px-4 sm:px-6 py-3 max-w-6xl">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3">
               <Wallet className="w-5 h-5 text-[#00d4ff]" />
@@ -212,80 +244,31 @@ export default function DashboardPage() {
                   </Button>
                 </a>
               )}
-              {status.config.smart_account_basescan_url && (
-                <a
-                  href={status.config.smart_account_basescan_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#2a2e44] text-[#a0a8bc] hover:bg-[#1a1d2e]"
-                  >
-                    <ExternalLink className="w-3 h-3 mr-1" /> Basescan
-                  </Button>
-                </a>
-              )}
             </div>
           </div>
         </div>
       </section>
 
       {/* Stats Grid */}
-      <section className="py-6">
+      <section className="py-4">
         <div className="container mx-auto px-4 sm:px-6 max-w-6xl">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <StatCard
-              icon={<Search className="w-4 h-4" />}
-              label="Total Scans"
-              value={stats.totalScans}
-              color="#00d4ff"
-            />
-            <StatCard
-              icon={<Rocket className="w-4 h-4" />}
-              label="Candidates Found"
-              value={stats.totalCandidatesDetected}
-              color="#00ff88"
-            />
-            <StatCard
-              icon={<Activity className="w-4 h-4" />}
-              label="Mints Attempted"
-              value={stats.totalMintsAttempted}
-              color="#ffaa00"
-            />
-            <StatCard
-              icon={<CheckCircle2 className="w-4 h-4" />}
-              label="Successful Mints"
-              value={stats.totalMintsSucceeded}
-              color="#00ff88"
-            />
-            <StatCard
-              icon={<XCircle className="w-4 h-4" />}
-              label="Failed Mints"
-              value={stats.totalMintsFailed}
-              color="#ff0088"
-            />
-            <StatCard
-              icon={<Coins className="w-4 h-4" />}
-              label="Success Rate"
-              value={`${stats.success_rate}%`}
-              color="#00d4ff"
-            />
+            <StatCard icon={<Search className="w-4 h-4" />} label="Total Scans" value={stats.totalScans} color="#00d4ff" />
+            <StatCard icon={<Rocket className="w-4 h-4" />} label="Candidates" value={stats.totalCandidatesDetected} color="#00ff88" />
+            <StatCard icon={<Activity className="w-4 h-4" />} label="Mint Attempts" value={stats.totalMintsAttempted} color="#ffaa00" />
+            <StatCard icon={<CheckCircle2 className="w-4 h-4" />} label="Success" value={stats.totalMintsSucceeded} color="#00ff88" />
+            <StatCard icon={<XCircle className="w-4 h-4" />} label="Failed" value={stats.totalMintsFailed} color="#ff0088" />
+            <StatCard icon={<Coins className="w-4 h-4" />} label="Success %" value={`${stats.success_rate}%`} color="#00d4ff" />
           </div>
         </div>
       </section>
 
       {/* Action Buttons */}
-      <section className="py-4">
+      <section className="py-2">
         <div className="container mx-auto px-4 sm:px-6 max-w-6xl">
           <div className="flex gap-3 flex-wrap">
-            <Button
-              onClick={triggerScan}
-              disabled={scanLoading}
-              className="bg-[#0052ff] hover:bg-[#0040cc]"
-            >
-              {scanLoading ? (
+            <Button onClick={triggerScan} disabled={scanLoading} className="bg-[#0052ff] hover:bg-[#0040cc]">
+              {scanLoading || isScanning ? (
                 <Loader2 className="w-4 h-4 mr-1 animate-spin" />
               ) : (
                 <Search className="w-4 h-4 mr-1" />
@@ -297,29 +280,62 @@ export default function DashboardPage() {
               disabled={runLoading}
               className="bg-[#00ff88] hover:bg-[#00cc6a] text-[#0a0b14] font-semibold"
             >
-              {runLoading ? (
+              {runLoading || isMinting ? (
                 <Loader2 className="w-4 h-4 mr-1 animate-spin" />
               ) : (
                 <Rocket className="w-4 h-4 mr-1" />
               )}
-              Trigger Full Cycle (Scan + Mint)
+              Trigger Full Cycle
             </Button>
           </div>
-          <div className="mt-2 text-xs text-[#5a6178] flex items-center gap-2">
+          <div className="mt-2 text-xs text-[#5a6178] flex items-center gap-2 flex-wrap">
             <Clock className="w-3 h-3" />
             Last scan: {stats.lastScanAt ? new Date(stats.lastScanAt).toLocaleString() : 'never'}
             {' · '}
             Last mint: {stats.lastMintAt ? new Date(stats.lastMintAt).toLocaleString() : 'never'}
-            {' · '}
-            Uptime since: {new Date(stats.firstRunAt).toLocaleString()}
           </div>
         </div>
       </section>
 
+      {/* Live Activity Feed */}
+      <section className="py-3">
+        <div className="container mx-auto px-4 sm:px-6 max-w-6xl">
+          <Card className="bg-[#13151f] border-[#1f2233]">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-[#00ff88]" />
+                  Live Activity
+                </span>
+                <Badge variant="secondary" className="text-[10px] font-mono bg-[#1f2233] text-[#7a8295]">
+                  {status.activity_log?.length || 0} events
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {(!status.activity_log || status.activity_log.length === 0) ? (
+                <div className="text-center py-6 text-[#5a6178]">
+                  <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">No activity yet.</p>
+                  <p className="text-xs mt-1">
+                    Trigger a scan to see live events as they happen.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-96 overflow-y-auto">
+                  {status.activity_log.map((ev, i) => (
+                    <ActivityRow key={i} event={ev} />
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </section>
+
       {/* Two-column: Recent Mints + Manual Mint */}
-      <section className="py-6">
-        <div className="container mx-auto px-4 sm:px-6 max-w-6xl grid lg:grid-cols-3 gap-6">
-          {/* Recent Mints - takes 2/3 */}
+      <section className="py-3">
+        <div className="container mx-auto px-4 sm:px-6 max-w-6xl grid lg:grid-cols-3 gap-4">
           <Card className="bg-[#13151f] border-[#1f2233] lg:col-span-2">
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
@@ -334,12 +350,10 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent>
               {status.recent_mints.length === 0 ? (
-                <div className="text-center py-8 text-[#5a6178]">
+                <div className="text-center py-6 text-[#5a6178]">
                   <Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
                   <p className="text-sm">No mints yet.</p>
-                  <p className="text-xs mt-1">
-                    Bot runs every 5 min via cron-job.org. First results may take 1-24 hours.
-                  </p>
+                  <p className="text-xs mt-1">Bot runs every 5 min via cron-job.org.</p>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -351,7 +365,6 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Manual Mint - takes 1/3 */}
           <Card className="bg-[#13151f] border-[#1f2233]">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -395,9 +408,7 @@ export default function DashboardPage() {
                   {manualResult.success ? (
                     <div className="space-y-1">
                       <div className="font-semibold">✓ Minted!</div>
-                      <div className="font-mono text-[10px] break-all">
-                        tx: {manualResult.txHash}
-                      </div>
+                      <div className="font-mono text-[10px] break-all">tx: {manualResult.txHash}</div>
                       {manualResult.candidate?.opensea_url && (
                         <a
                           href={manualResult.candidate.opensea_url}
@@ -417,117 +428,85 @@ export default function DashboardPage() {
                   )}
                 </div>
               )}
-              <div className="text-[10px] text-[#5a6178] mt-2">
-                Find free mints on Twitter/Farcast. Paste contract address here. Bot will detect
-                free-mint function and execute gaslessly.
-              </div>
             </CardContent>
           </Card>
         </div>
       </section>
 
-      {/* Scanned Contracts */}
-      <section className="py-6">
-        <div className="container mx-auto px-4 sm:px-6 max-w-6xl">
-          <Card className="bg-[#13151f] border-[#1f2233]">
-            <CardHeader>
-              <CardTitle className="flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                  <Search className="w-4 h-4 text-[#00d4ff]" />
-                  Recently Scanned Contracts ({status.scanned_contracts_count})
-                </span>
-                <Badge variant="secondary" className="text-[10px] font-mono bg-[#1f2233] text-[#7a8295]">
-                  Last 10 (in-memory)
-                </Badge>
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {status.last_scanned_contracts.length === 0 ? (
-                <div className="text-center py-6 text-[#5a6178] text-sm">
-                  No contracts scanned yet. Run a scan to see activity.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {status.last_scanned_contracts.map((addr) => (
-                    <a
-                      key={addr}
-                      href={`https://opensea.io/assets/base/${addr}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center justify-between p-2 rounded-md bg-[#0a0b14] border border-[#1f2233] hover:border-[#2a2e44] text-xs font-mono text-[#a0a8bc] hover:text-[#00d4ff]"
-                    >
-                      <span className="truncate">{addr}</span>
-                      <ExternalLink className="w-3 h-3 shrink-0 ml-2" />
-                    </a>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </section>
-
-      {/* Footer */}
       <footer className="border-t border-[#1f2233] py-4">
         <div className="container mx-auto px-4 sm:px-6 max-w-6xl flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-[#5a6178]">
-          <div>Base Airdrop Sniper · Auto-refreshes every 30s</div>
-          <div className="font-mono">Powered by Pimlico Smart Account + OpenSea API</div>
+          <div>Base Sniper · Auto-refresh every 5s · Multi-chain (Base/Optimism/Arbitrum/Polygon/Ethereum)</div>
+          <div className="font-mono">Powered by Pimlico + OpenSea + Basescan</div>
         </div>
       </footer>
     </main>
   );
 }
 
-function StatCard({
-  icon,
-  label,
-  value,
-  color,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string | number;
-  color: string;
-}) {
+function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string | number; color: string }) {
   return (
     <Card className="bg-[#13151f] border-[#1f2233]">
       <CardContent className="p-3 sm:p-4">
         <div className="flex items-center gap-2 mb-1">
           <span style={{ color }}>{icon}</span>
-          <span className="text-[10px] sm:text-xs uppercase tracking-wider text-[#5a6178] font-mono">
-            {label}
-          </span>
+          <span className="text-[10px] sm:text-xs uppercase tracking-wider text-[#5a6178] font-mono">{label}</span>
         </div>
-        <div className="text-xl sm:text-2xl font-bold" style={{ color }}>
-          {value}
-        </div>
+        <div className="text-xl sm:text-2xl font-bold" style={{ color }}>{value}</div>
       </CardContent>
     </Card>
   );
 }
 
+function ActivityRow({ event }: { event: ActivityEvent }) {
+  const color =
+    event.type === 'mint_success' ? '#00ff88' :
+    event.type === 'mint_failure' || event.type === 'error' ? '#ff0088' :
+    event.type === 'candidate_found' ? '#ffaa00' :
+    event.type === 'mint_attempt' ? '#ffaa00' :
+    event.type === 'scan_start' || event.type === 'chain_scan' ? '#00d4ff' :
+    '#7a8295';
+
+  const icon = event.type === 'mint_success' ? '✓' :
+    event.type === 'mint_failure' || event.type === 'error' ? '✗' :
+    event.type === 'candidate_found' ? '🎯' :
+    event.type === 'mint_attempt' ? '⚡' :
+    event.type === 'scan_start' ? '🔍' :
+    event.type === 'chain_scan' ? '⛓' :
+    event.type === 'scan_complete' ? '✓' : '•';
+
+  const time = new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  return (
+    <div className="flex items-start gap-2 p-2 rounded-md bg-[#0a0b14] border border-[#1f2233] text-xs">
+      <span className="font-mono text-[#5a6178] shrink-0">{time}</span>
+      <span style={{ color }} className="shrink-0 font-bold">{icon}</span>
+      <span className="text-[#a0a8bc] break-all">{event.message}</span>
+      {event.chain && (
+        <Badge variant="secondary" className="ml-auto text-[9px] font-mono bg-[#1f2233] text-[#7a8295] shrink-0">
+          {event.chain}
+        </Badge>
+      )}
+    </div>
+  );
+}
+
 function MintRow({ mint }: { mint: StatusResponse['recent_mints'][number] }) {
   return (
-    <div
-      className={`p-3 rounded-md border ${
-        mint.success
-          ? 'bg-[#0a3a2a] border-[#00ff88]/30'
-          : 'bg-[#3a0a0a] border-[#ff0088]/30'
-      }`}
-    >
+    <div className={`p-3 rounded-md border ${
+      mint.success ? 'bg-[#0a3a2a] border-[#00ff88]/30' : 'bg-[#3a0a0a] border-[#ff0088]/30'
+    }`}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            {mint.success ? (
-              <CheckCircle2 className="w-3 h-3 text-[#00ff88]" />
-            ) : (
-              <XCircle className="w-3 h-3 text-[#ff0088]" />
-            )}
+            {mint.success ? <CheckCircle2 className="w-3 h-3 text-[#00ff88]" /> : <XCircle className="w-3 h-3 text-[#ff0088]" />}
             <span className="text-sm font-semibold truncate">{mint.candidate.name}</span>
+            {mint.candidate.chain && (
+              <Badge variant="secondary" className="text-[9px] font-mono bg-[#1f2233] text-[#7a8295]">
+                {mint.candidate.chain}
+              </Badge>
+            )}
           </div>
-          <div className="text-[10px] font-mono text-[#7a8295] truncate">
-            {mint.candidate.contract}
-          </div>
+          <div className="text-[10px] font-mono text-[#7a8295] truncate">{mint.candidate.contract}</div>
           {mint.txHash && (
             <a
               href={`https://basescan.org/tx/${mint.txHash}`}
@@ -545,17 +524,8 @@ function MintRow({ mint }: { mint: StatusResponse['recent_mints'][number] }) {
           )}
         </div>
         {mint.candidate.opensea_url && (
-          <a
-            href={mint.candidate.opensea_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="shrink-0"
-          >
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 px-2 text-xs text-[#00d4ff] hover:bg-[#1a1d2e]"
-            >
+          <a href={mint.candidate.opensea_url} target="_blank" rel="noopener noreferrer" className="shrink-0">
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-xs text-[#00d4ff] hover:bg-[#1a1d2e]">
               OpenSea <ExternalLink className="w-2 h-2 ml-1" />
             </Button>
           </a>
@@ -564,3 +534,4 @@ function MintRow({ mint }: { mint: StatusResponse['recent_mints'][number] }) {
     </div>
   );
 }
+
