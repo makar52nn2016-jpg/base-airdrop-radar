@@ -285,6 +285,21 @@ Current stats:
 - Total mints: ${getStats().totalMintsSucceeded}
 - None sold yet (manual listing required)`;
 
+    case '/liquidations': {
+      const { scanAllChainsForLiquidations } = await import('@/lib/liquidations');
+      try {
+        const count = await scanAllChainsForLiquidations(50);
+        return `🔥 *Aave V3 Liquidation scan*
+
+Scanned last 50 blocks on all 5 chains.
+Found *${count}* new liquidations.
+
+${count > 0 ? 'Check Telegram for per-event notifications ⬆️' : 'No new liquidations in this scan window. Try again in a few minutes.'}`;
+      } catch (e: any) {
+        return `❌ Liquidation scan failed: ${e.message?.slice(0, 200)}`;
+      }
+    }
+
     case '/mint': {
       if (!args || !args.startsWith('0x') || args.length !== 42) {
         return `❌ Usage: \`/mint 0xCONTRACT_ADDRESS\``;

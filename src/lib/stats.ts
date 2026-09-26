@@ -61,7 +61,7 @@ const stats: Stats = {
 const MAX_SCANNED_LOG = 50;
 const MAX_ACTIVITY_LOG = 50;
 
-function logActivity(event: Omit<ActivityEvent, 'ts'>) {
+export function logActivity(event: Omit<ActivityEvent, 'ts'>) {
   const entry: ActivityEvent = { ...event, ts: new Date().toISOString() };
   stats.activityLog.unshift(entry);
   if (stats.activityLog.length > MAX_ACTIVITY_LOG) {
