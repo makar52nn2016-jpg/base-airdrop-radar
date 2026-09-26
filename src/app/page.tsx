@@ -46,10 +46,10 @@ export async function generateMetadata(): Promise<Metadata> {
     other[`fc:frame:button:${n}:target`] = `${baseUrl}/api/frame`;
   });
 
-  // 4th button: Tip via tx action
-  other['fc:frame:button:4'] = '☕ Tip 0.001 ETH';
-  other['fc:frame:button:4:action'] = 'tx';
-  other['fc:frame:button:4:target'] = `${baseUrl}/api/tip`;
+  // 4th button: Tip — opens tip tier picker (post → tip-select state)
+  other['fc:frame:button:4'] = '☕ Tip the radar';
+  other['fc:frame:button:4:action'] = 'post';
+  other['fc:frame:button:4:target'] = `${baseUrl}/api/frame`;
 
   return {
     title: 'Base Airdrop Radar — Top 3 gasless campaigns, updated weekly',

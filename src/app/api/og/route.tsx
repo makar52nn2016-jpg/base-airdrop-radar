@@ -16,6 +16,80 @@ export async function GET(request: Request) {
   const highlightId = url.searchParams.get('highlight');
   const campaigns = getTopAirdrops(3);
 
+  // Special "tip" highlight — show support-themed image
+  if (highlightId === 'tip') {
+    return new ImageResponse(
+      (
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            backgroundColor: '#0a0b14',
+            color: '#ffffff',
+            fontFamily: 'system-ui, -apple-system, sans-serif',
+            padding: '40px 50px',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              fontSize: '120px',
+              marginBottom: '20px',
+            }}
+          >
+            ☕
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              fontSize: '48px',
+              fontWeight: 800,
+              color: '#ffaa00',
+              marginBottom: '12px',
+            }}
+          >
+            Support the Radar
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              fontSize: '20px',
+              color: '#a0a8bc',
+              textAlign: 'center',
+            }}
+          >
+            Pick a tip amount below · ETH on Base · 100% to maintainer
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              marginTop: '40px',
+              padding: '16px 24px',
+              backgroundColor: '#1a1d2e',
+              borderRadius: '12px',
+              border: '1px solid #2a2e44',
+              fontSize: '16px',
+              color: '#7a8295',
+            }}
+          >
+            0.001 ETH (~$3) · 0.01 ETH (~$30) · 0.05 ETH (~$150)
+          </div>
+        </div>
+      ),
+      {
+        width: 1200,
+        height: 628,
+        headers: {
+          'Cache-Control': 'public, max-age=300, s-maxage=300',
+        },
+      }
+    );
+  }
+
   return new ImageResponse(
     (
       <div
