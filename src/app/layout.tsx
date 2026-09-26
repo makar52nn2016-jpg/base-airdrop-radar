@@ -1,17 +1,9 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
-const jetbrains = JetBrains_Mono({
-  variable: "--font-jetbrains",
-  subsets: ["latin"],
-});
+// Use system fonts only — avoids Google Fonts fetch failures during Vercel build
+// (Inter / JetBrains Mono fetching has been intermittently failing on Vercel)
 
 export const metadata: Metadata = {
   title: "Base Airdrop Radar — Top 3 gasless campaigns on Base",
@@ -38,7 +30,8 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${inter.variable} ${jetbrains.variable} antialiased bg-background text-foreground`}
+        className="antialiased bg-background text-foreground"
+        style={{ fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}
       >
         {children}
         <Toaster />
