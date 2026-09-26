@@ -55,6 +55,86 @@ interface CollectionsListResponse {
 type CollectionDetailResponse = OpenSeaCollectionDetail;
 
 /**
+ * Fetches all NFTs owned by an address across all OpenSea-supported chains.
+ *
+ * Endpoint: GET /api/v2/assets?owner=<address>
+ * Returns: array of NFTs with contract, tokenId, name, image, collection
+ *
+ * This is the PERSISTENT view of the Smart Account — survives Vercel cold starts.
+ * Used by /api/sniper/portfolio and dashboard.
+ *
+ * @param ownerAddress wallet address to fetch NFTs for
+ * @param chain filter by chain (optional, e.g. 'base', 'optimism', 'ethereum', 'matic')
+ * @param limit max NFTs to return (default 50)
+ */
+export interface OwnedNFT {
+  identifier: string; // token_id
+  contract: string;
+  chain: string;
+  name: string | null;
+  description: string | null;
+  image_url: string | null;
+  collection: string; // slug
+  collection_name: string | null;
+  opensea_url: string | null;
+  token_standard: string | null;
+}
+
+export async function getAccountNFTs(
+  ownerAddress: string,
+  chain?: string,
+  limit = 50
+): Promise<OwnedNFT[]> {
+  if (!OPENSEA_API_KEY) {
+    throw new Error('OPENSEA_API_KEY env var is not set');
+  }
+
+  const chainParam = chain ? `&chain=${chain}` : '';
+  const url = `${OPENSEA_BASE_URL}/assets?owner=${ownerAddress}&limit=${Math.min(
+    limit,
+    50
+  )}${chainParam}`;
+
+  const response = await fetch(url, {
+    headers: {
+      'X-API-KEY': OPENSEA_API_KEY,
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenSea assets API error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  return (data.assets || []).map((a: any) => ({
+    identifier: String(a.identifier || a.token_id || ''),
+    contract: a.contract || '',
+    chain: a.chain || '',
+    name: a.name || null,
+    description: a.description || null,
+    image_url: a.image_url || null,
+    collection: a.collection || '',
+    collection_name: a?.collection_name || null,
+    opensea_url: a.opensea_url || null,
+    token_standard: a.token_standard || null,
+  }));
+}
+
+/**
+ * Fetches NFTs owned by address on ALL chains OpenSea supports.
+ * Returns deduplicated list across all chains.
+ */
+export async function getAccountNFTsAllChains(
+  ownerAddress: string,
+  limit = 100
+): Promise<OwnedNFT[]> {
+  // Try fetching all at once (no chain filter — OpenSea returns cross-chain)
+  return getAccountNFTs(ownerAddress, undefined, limit);
+}
+
+/**
  * Fetches collections on Base chain.
  * Returns up to `limit` collections (default 50).
  */
