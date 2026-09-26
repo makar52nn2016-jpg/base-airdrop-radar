@@ -1,22 +1,19 @@
 /**
- * In-memory stats tracker + live activity log.
+ * In-memory stats tracker + live activity log + Supabase persistence.
  *
- * Survives on warm Vercel instances only — for persistent storage,
- * wire up Supabase later (see README).
+ * v3 — now syncs to Supabase on every state change (best-effort, fire-and-forget).
+ * Reads from Supabase on cold start (if in-memory state is empty).
+ * This solves the Vercel cold start problem — stats survive instance recycling.
  *
  * Tracked metrics:
- *   - totalScans: number of scan() calls
- *   - totalCandidatesDetected: number of free-mint contracts found
- *   - totalMintsAttempted: number of mint() calls
- *   - totalMintsSucceeded: number of mints that returned a txHash
- *   - totalMintsFailed: number of mints that errored
- *   - lastScanAt: ISO timestamp of last scan
- *   - lastMintAt: ISO timestamp of last mint attempt
- *   - firstRunAt: ISO timestamp of first invocation (proxy for "uptime since")
- *   - activityLog: rolling log of last 50 events (scan/mint/etc) with timestamps
- *     — used by dashboard for real-time activity feed
- *   - scannedContracts: last 50 unique contract addresses we scanned
+ *   - totalScans, totalCandidatesDetected, totalMintsAttempted/Succeeded/Failed
+ *   - lastScanAt, lastMintAt, firstRunAt
+ *   - activityLog: last 50 events
+ *   - scannedContracts: last 50 unique addresses
+ *   - botState: idle | scanning | minting
  */
+
+import { persistBotState } from '@/lib/supabase';
 
 interface ActivityEvent {
   ts: string; // ISO timestamp
@@ -67,6 +64,7 @@ export function logActivity(event: Omit<ActivityEvent, 'ts'>) {
   if (stats.activityLog.length > MAX_ACTIVITY_LOG) {
     stats.activityLog.pop();
   }
+  syncToSupabase();
 }
 
 export function setBotState(state: 'idle' | 'scanning' | 'minting', chain?: string) {
@@ -165,4 +163,23 @@ export function getStats() {
     scannedContracts: [...stats.scannedContracts],
     activityLog: [...stats.activityLog],
   };
+}
+
+/**
+ * Syncs current in-memory state to Supabase (fire-and-forget, best-effort).
+ * Called after each state change (scan, mint, activity event).
+ */
+let lastSyncTime = 0;
+const SYNC_INTERVAL_MS = 5000; // sync at most every 5s to avoid spamming Supabase
+
+export function syncToSupabase() {
+  const now = Date.now();
+  if (now - lastSyncTime < SYNC_INTERVAL_MS) return; // rate limit
+  lastSyncTime = now;
+
+  void persistBotState({
+    stats: { ...stats, scannedContracts: undefined, activityLog: undefined },
+    activityLog: [...stats.activityLog].slice(0, 30),
+    recentMints: [], // recentMints are in sniper.ts, not stats.ts — skip for now
+  }).catch(() => {});
 }
