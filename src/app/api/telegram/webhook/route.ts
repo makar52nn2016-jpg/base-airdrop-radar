@@ -300,6 +300,21 @@ ${count > 0 ? 'Check Telegram for per-event notifications ⬆️' : 'No new liqu
       }
     }
 
+    case '/unhealthy': {
+      const { scanAllChainsForUnhealthy } = await import('@/lib/liquidations');
+      try {
+        const result = await scanAllChainsForUnhealthy(30);
+        return `⚠ *Unhealthy position scan*
+
+Scanned *${result.totalScanned}* Aave V3 borrowers across 5 chains.
+Found *${result.totalUnhealthy}* unhealthy positions (HF < 1.05).
+
+${result.totalUnhealthy > 0 ? 'Check Telegram for per-position alerts ⬆️' : 'No unhealthy positions found this scan. Bot auto-scans every 5 min via cron.'}`;
+      } catch (e: any) {
+        return `❌ Unhealthy scan failed: ${e.message?.slice(0, 200)}`;
+      }
+    }
+
     case '/mint': {
       if (!args || !args.startsWith('0x') || args.length !== 42) {
         return `❌ Usage: \`/mint 0xCONTRACT_ADDRESS\``;

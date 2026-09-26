@@ -87,6 +87,7 @@ export function getMainMenuKeyboard() {
       ],
       [
         { text: '🔥 Liquidations', callback_data: '/liquidations' },
+        { text: '⚠ Unhealthy', callback_data: '/unhealthy' },
       ],
       [
         { text: '🌐 Open Dashboard', url: 'https://base-airdrop-radar.vercel.app/dashboard' },
