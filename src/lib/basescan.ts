@@ -35,14 +35,18 @@ export async function getContractAbi(contractAddress: string): Promise<any[] | n
 /**
  * Comprehensive ABI fragment covering all common free-mint function signatures.
  *
- * v2 expanded — covers 30+ function names × 4 arg variants = 120+ candidates.
+ * v3 — expanded with ERC-1155 specific signatures.
+ * Most new NFT contracts on Base/L2s are ERC-1155 (cheaper to mint, batch support).
  *
  * Names covered: mint, publicMint, claim, freeMint, safeMint, mintTo,
  * airdrop, gift, claimFree, mintForFree, mintToken, batchMint, claimTokens,
  * requestTokens, receiveNFT, mintFree, mintBatch, claimNFT, drop,
  * freeClaim, give, sendNFT, grant, publicClaim.
+ *
+ * Arg variants: no-args, uint256, address, (address,uint256), ERC-1155 batch signatures.
  */
 export const FREE_MINT_ABI = parseAbi([
+  // ============ ERC-721 standard signatures ============
   // No-args variants
   'function mint() public',
   'function publicMint() public',
@@ -110,6 +114,43 @@ export const FREE_MINT_ABI = parseAbi([
   'function grant(address to, uint256 quantity) public',
   'function mintToken(address to, uint256 quantity) public',
   'function mintBatch(address to, uint256 quantity) public',
+
+  // ============ ERC-1155 specific signatures ============
+  // mint(address to, uint256 id, uint256 amount, bytes data) — standard ERC-1155 single
+  'function mint(address to, uint256 id, uint256 amount, bytes data) public',
+  'function mintTo(address to, uint256 id, uint256 amount, bytes data) public',
+  'function safeMint(address to, uint256 id, uint256 amount, bytes data) public',
+  'function airdrop(address to, uint256 id, uint256 amount, bytes data) public',
+  'function gift(address to, uint256 id, uint256 amount, bytes data) public',
+  'function claim(address to, uint256 id, uint256 amount, bytes data) public',
+  'function freeMint(address to, uint256 id, uint256 amount, bytes data) public',
+  'function mintForFree(address to, uint256 id, uint256 amount, bytes data) public',
+  // mintBatch(address to, uint256[] ids, uint256[] amounts, bytes data) — standard ERC-1155 batch
+  'function mintBatch(address to, uint256[] ids, uint256[] amounts, bytes data) public',
+  'function batchMint(address to, uint256[] ids, uint256[] amounts, bytes data) public',
+  'function airdropBatch(address to, uint256[] ids, uint256[] amounts, bytes data) public',
+  // Simpler ERC-1155 patterns (no bytes data arg)
+  'function mint(address to, uint256 id, uint256 amount) public',
+  'function mintTo(address to, uint256 id, uint256 amount) public',
+  'function safeMint(address to, uint256 id, uint256 amount) public',
+  'function claim(address to, uint256 id, uint256 amount) public',
+  'function freeMint(address to, uint256 id, uint256 amount) public',
+  'function airdrop(address to, uint256 id, uint256 amount) public',
+  'function gift(address to, uint256 id, uint256 amount) public',
+  // ERC-1155 claim style: claim(uint256 id, uint256 amount)
+  'function claim(uint256 id, uint256 amount) public',
+  'function freeMint(uint256 id, uint256 amount) public',
+  'function mint(uint256 id, uint256 amount) public',
+  'function publicMint(uint256 id, uint256 amount) public',
+  'function claimFree(uint256 id, uint256 amount) public',
+  'function mintForFree(uint256 id, uint256 amount) public',
+  // ERC-1155 with just id (1 amount implied)
+  'function claim(uint256 id) public',
+  'function freeMint(uint256 id) public',
+  'function mint(uint256 id) public',
+  'function publicMint(uint256 id) public',
+  'function claimFree(uint256 id) public',
+  'function mintForFree(uint256 id) public',
 ]);
 
 /**

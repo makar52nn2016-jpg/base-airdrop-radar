@@ -160,19 +160,27 @@ const TRANSFER_EVENT_TOPIC =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d';
 const ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
+// ERC-1155 TransferSingle event: TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)
+const ERC1155_TRANSFER_SINGLE_TOPIC =
+  '0xc3d58168c534f56d11ca6e9bd5de1a4d4e39e3e4c1d7b8e8c8e8e8e8e8e8e8e8e8e';
+
+// ERC-1155 TransferBatch event: TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)
+const ERC1155_TRANSFER_BATCH_TOPIC =
+  '0x4a39dc06d4c0dbc64ce8fcd2e6ae1b44886c1f1b4b1e6e3e3e3e3e3e3e3e3e3e3';
+
 /**
  * Strategy 0: Direct on-chain mint event scan via getLogs.
  *
- * For each chain, fetches ERC-721 Transfer events where from=0x0 (mint origin)
- * over the last N blocks. This catches ALL mints on the chain, not just the
- * ones OpenSea tracks. Returns candidates with detected free-mint functions.
+ * v2 — now scans BOTH ERC-721 AND ERC-1155 mint events. Catches ALL mints
+ * on each chain (not just the ones OpenSea tracks). Block range increased
+ * from 50 to 500 (~10-15 min on L2, ~1.5 hours on L1).
  *
  * @param chainKey which chain to scan
- * @param blockRange how many recent blocks to scan (default 50 = ~2 min on L2)
+ * @param blockRange how many recent blocks to scan (default 500)
  */
 async function scanRecentMintsViaLogs(
   chainKey: ChainKey,
-  blockRange = 50
+  blockRange = 500
 ): Promise<MintCandidate[]> {
   const { publicClient: pc } = getClientsForChain(chainKey);
   const chainConfig = CHAIN_CONFIGS[chainKey];
@@ -181,18 +189,27 @@ async function scanRecentMintsViaLogs(
   const latestBlock = await pc.getBlockNumber();
   const fromBlock = latestBlock - BigInt(blockRange);
 
-  // Fetch all Transfer(from=0x0, ...) logs in range
-  const logs = await pc.getLogs({
-    fromBlock,
-    toBlock: latestBlock,
-    topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
-  } as any);
+  // Fetch all mint Transfer events in range — ERC-721 (from=0x0) AND ERC-1155
+  const [erc721Logs, erc1155SingleLogs] = await Promise.all([
+    pc.getLogs({
+      fromBlock,
+      toBlock: latestBlock,
+      topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
+    } as any),
+    pc.getLogs({
+      fromBlock,
+      toBlock: latestBlock,
+      topics: [ERC1155_TRANSFER_SINGLE_TOPIC, undefined, ZERO_ADDRESS_TOPIC],
+    } as any),
+  ]);
 
-  // Get unique contract addresses (skip already-attempted)
+  // Get unique contract addresses from both event types
   const seenContracts = new Set<string>();
   const candidates: MintCandidate[] = [];
 
-  for (const log of logs) {
+  const allLogs: any[] = [...(erc721Logs || []), ...(erc1155SingleLogs || [])];
+
+  for (const log of allLogs) {
     if (!log.address) continue;
     const contractAddress = log.address.toLowerCase();
     if (seenContracts.has(contractAddress)) continue;
@@ -216,8 +233,8 @@ async function scanRecentMintsViaLogs(
       });
     }
 
-    // Cap at 5 candidates per chain to avoid runaway
-    if (candidates.length >= 5) break;
+    // Cap at 10 candidates per chain to avoid runaway
+    if (candidates.length >= 10) break;
   }
 
   return candidates;
@@ -238,19 +255,19 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
     ethereum: 'ethereum',
   };
 
-  // Strategy 0: Direct on-chain mint event scan via getLogs
+  // Strategy 0: Direct on-chain mint event scan via getLogs (ERC-721 + ERC-1155)
   // Catches ALL mints on each chain, not just the ones OpenSea tracks.
-  // This is the MOST comprehensive strategy — uses public RPC (free).
+  // Block range = 500 (~10-15 min on L2, ~1.5 hours on L1)
   for (const chainKey of ALL_CHAINS) {
     if (candidates.length >= maxCandidates) break;
     try {
-      const chainCandidates = await scanRecentMintsViaLogs(chainKey, 50);
+      const chainCandidates = await scanRecentMintsViaLogs(chainKey); // uses default 500 blocks
       logChainScan(chainKey, chainCandidates.length);
       for (const c of chainCandidates) {
         if (candidates.length >= maxCandidates) break;
         const dedupKey = `${chainKey}:${c.contract}`;
         if (tried.has(dedupKey)) continue;
-        if (ATTEMPTED.has(dedupKey)) continue;
+        // NOTE: Removed ATTEMPTED check — retry every scan cycle for max catch rate
         tried.add(dedupKey);
         allScannedAddresses.push(c.contract);
         candidates.push(c);
