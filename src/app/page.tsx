@@ -46,6 +46,11 @@ export async function generateMetadata(): Promise<Metadata> {
     other[`fc:frame:button:${n}:target`] = `${baseUrl}/api/frame`;
   });
 
+  // 4th button: Tip via tx action
+  other['fc:frame:button:4'] = '☕ Tip 0.001 ETH';
+  other['fc:frame:button:4:action'] = 'tx';
+  other['fc:frame:button:4:target'] = `${baseUrl}/api/tip`;
+
   return {
     title: 'Base Airdrop Radar — Top 3 gasless campaigns, updated weekly',
     description:

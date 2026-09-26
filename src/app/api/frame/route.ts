@@ -91,6 +91,9 @@ function renderList(campaigns: ReturnType<typeof getTopAirdrops>, baseUrl: strin
 <meta property="og:title" content="Base Airdrop Radar — Top 3 gasless campaigns" />
 <meta property="fc:frame:state" content="initial" />
 ${buttons}
+<meta property="fc:frame:button:4" content="☕ Tip 0.001 ETH" />
+<meta property="fc:frame:button:4:action" content="tx" />
+<meta property="fc:frame:button:4:target" content="${baseUrl}/api/tip" />
 </head>
 <body>
 <h1>Base Airdrop Radar</h1>
