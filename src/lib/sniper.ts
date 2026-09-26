@@ -569,11 +569,5 @@ export function getRecentMints(): MintResult[] {
   return [...RECENT_MINTS];
 }
 
-/**
- * Returns the Smart Account address (without initializing the full client).
- * Useful for status display.
- */
-export async function getSmartAccountAddress(): Promise<string> {
-  const { smartAccountAddress } = await initSmartAccount();
-  return smartAccountAddress;
-}
+// Note: getSmartAccountAddress() is defined earlier in this file (around line 132)
+// — see that definition for the implementation.
