@@ -25,7 +25,7 @@
  *   - Arbitrum: 0x794a313d1f9291A4Ef4a0e9F6c05330513add5d2 (L2Pool)
  */
 
-import { parseAbiItem } from 'viem';
+import { parseAbiItem, parseAbi } from 'viem';
 import { getClientsForChain, CHAIN_CONFIGS, type ChainKey } from '@/lib/pimlico';
 import { sendTelegramMessage } from '@/lib/telegram';
 import { logActivity } from '@/lib/stats';
