@@ -23,7 +23,7 @@
   "crons": [
     {
       "path": "/api/sniper/run",
-      "schedule": "*/10 * * * *"
+      "schedule": "0 * * * *"
     }
   ]
 }
