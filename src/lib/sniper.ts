@@ -189,6 +189,7 @@ async function scanRecentMintsViaLogs(
   const fromBlock = latestBlock - BigInt(blockRange);
 
   // Fetch all mint Transfer events in range — ERC-721 (from=0x0) AND ERC-1155
+  // Use null instead of undefined for wildcard topic positions (Ankr RPC requires null)
   const [erc721Logs, erc1155SingleLogs] = await Promise.all([
     pc.getLogs({
       fromBlock,
@@ -198,7 +199,7 @@ async function scanRecentMintsViaLogs(
     pc.getLogs({
       fromBlock,
       toBlock: latestBlock,
-      topics: [ERC1155_TRANSFER_SINGLE_TOPIC, undefined, ZERO_ADDRESS_TOPIC],
+      topics: [ERC1155_TRANSFER_SINGLE_TOPIC, null, ZERO_ADDRESS_TOPIC],
     } as any),
   ]);
 
