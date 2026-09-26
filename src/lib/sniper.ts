@@ -13,6 +13,7 @@ import {
 } from '@/lib/opensea';
 import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
 import { recordScan, recordMintAttempt, recordMintSuccess, recordMintFailure } from '@/lib/stats';
+import { notifyMintSuccess, notifyMintFailure } from '@/lib/telegram';
 
 /**
  * Core sniper logic.
@@ -238,6 +239,17 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     ATTEMPTED.add(candidate.slug);
     recordMintSuccess();
 
+    // Notify Telegram (fire-and-forget — don't block on failure)
+    void notifyMintSuccess({
+      contract: candidate.contract,
+      functionName: candidate.functionName,
+      txHash,
+      smartAccountAddress,
+      collectionName: candidate.name,
+      openseaUrl: candidate.opensea_url,
+      chain: 'base',
+    }).catch(() => {});
+
     return result;
   } catch (err: any) {
     const result: MintResult = {
@@ -249,6 +261,16 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(candidate.slug);
     recordMintFailure();
+
+    // Notify Telegram (fire-and-forget)
+    void notifyMintFailure({
+      contract: candidate.contract,
+      functionName: candidate.functionName,
+      error: err?.message || String(err),
+      collectionName: candidate.name,
+      chain: 'base',
+    }).catch(() => {});
+
     return result;
   }
 }
