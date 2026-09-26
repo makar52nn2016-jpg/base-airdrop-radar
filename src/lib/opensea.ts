@@ -124,40 +124,62 @@ interface EventsListResponse {
 
 /**
  * Fetches recent transfer events. NOTE: API does not respect `chain` filter,
- * so events come from ALL chains. Use filterBaseMintEvents() to filter
- * client-side for Base-only mint events.
+ * so events come from ALL chains. Use filterMintEventsForChains() to filter
+ * client-side for mint events on supported chains.
  *
- * @param limit max events to fetch (default 50, max 100)
+ * v2 — now supports multi-page pagination via cursor. Fetches up to `maxPages`
+ * pages (100 events per page) = up to 300 events total.
+ *
+ * @param limitPerRequest events per single API call (default 100, max 100)
  * @param sinceSeconds only return events from last N seconds (default 3600)
+ * @param maxPages max pages to fetch via cursor pagination (default 3 = 300 events)
  */
 export async function getRecentBaseTransfers(
-  limit = 50,
-  sinceSeconds = 3600
+  limitPerRequest = 100,
+  sinceSeconds = 3600,
+  maxPages = 3
 ): Promise<OpenSeaEvent[]> {
   if (!OPENSEA_API_KEY) {
     throw new Error('OPENSEA_API_KEY env var is not set');
   }
 
   const afterTs = Math.floor(Date.now() / 1000) - sinceSeconds;
-  const url = `${OPENSEA_BASE_URL}/events?chain=base&event_type=transfer&limit=${Math.min(
-    limit,
-    100
-  )}&after=${afterTs}`;
+  const allEvents: OpenSeaEvent[] = [];
+  let nextCursor: string | null = null;
 
-  const response = await fetch(url, {
-    headers: {
-      'X-API-KEY': OPENSEA_API_KEY,
-      Accept: 'application/json',
-    },
-    cache: 'no-store',
-  });
+  for (let page = 0; page < maxPages; page++) {
+    let url = `${OPENSEA_BASE_URL}/events?chain=base&event_type=transfer&limit=${Math.min(
+      limitPerRequest,
+      100
+    )}&after=${afterTs}`;
+    if (nextCursor) {
+      url += `&next=${encodeURIComponent(nextCursor)}`;
+    }
 
-  if (!response.ok) {
-    throw new Error(`OpenSea events API error: ${response.status} ${response.statusText}`);
+    const response = await fetch(url, {
+      headers: {
+        'X-API-KEY': OPENSEA_API_KEY,
+        Accept: 'application/json',
+      },
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      // On error, return what we have so far
+      break;
+    }
+
+    const data = (await response.json()) as EventsListResponse;
+    const events = data.asset_events || [];
+    allEvents.push(...events);
+
+    if (!data.next) {
+      break; // no more pages
+    }
+    nextCursor = data.next;
   }
 
-  const data = (await response.json()) as EventsListResponse;
-  return data.asset_events || [];
+  return allEvents;
 }
 
 /**
