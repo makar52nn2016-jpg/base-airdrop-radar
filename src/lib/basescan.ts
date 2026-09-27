@@ -354,9 +354,10 @@ export async function looksLikeContract(address: string): Promise<boolean> {
  * Returns the function name + args if a callable function is found.
  */
 
-// Max price for "cheap mint" strategy (0.001 ETH = ~$3). If contract's mint
-// price is below this threshold, bot will try to mint with msg.value = price.
-const MAX_CHEAP_MINT_PRICE = 1_000_000_000_000n; // 0.001 ETH in wei
+// Max price for "cheap mint" strategy (0.000166 ETH = ~$0.5 at ETH=$3000).
+// User wants max $0.5 per mint. If contract's mint price is below this,
+// bot will try to mint with msg.value = price.
+const MAX_CHEAP_MINT_PRICE = 166_000_000_000n; // 0.000166 ETH in wei (~$0.5)
 
 /**
  * Reads mint price from a contract via price()/cost()/mintPrice() functions.
@@ -369,6 +370,32 @@ async function getContractMintPrice(contractAddress: string): Promise<bigint | n
     const priceInfo = await checkMintPrice(contractAddress);
     if (!priceInfo) return null;
     return priceInfo.priceValue ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches the floor price of a contract's collection on OpenSea.
+ * Returns null if floor price is unknown (no collection, no trades, etc).
+ *
+ * Used for cheap mint profit check — only mint if floor ≥ 3x mint price
+ * (gives ~67% profit margin after OpenSea 2.5% fee + gas for listing).
+ */
+async function getOpenSeaFloorPrice(contractAddress: string): Promise<bigint | null> {
+  try {
+    const { getAssetContractInfo, getCollectionDetail } = await import('@/lib/opensea');
+    // First get collection slug from contract address
+    const info = await getAssetContractInfo(contractAddress);
+    if (!info || !info.collection) return null;
+
+    // Then get collection detail (includes floor_price)
+    const detail = await getCollectionDetail(info.collection);
+    if (!detail || !detail.floor_price || detail.floor_price <= 0) return null;
+
+    // Convert ETH float to wei bigint
+    const floorEth = detail.floor_price;
+    return BigInt(Math.floor(floorEth * 1e18));
   } catch {
     return null;
   }
@@ -407,10 +434,29 @@ export async function findFreeMintFunction(
     return { ...fastFallbackResult, source: 'fallback' };
   }
 
-  // Strategy 4: CHEAP MINT detection — contract has a payable mint with price < 0.001 ETH
-  // This lets bot mint cheap NFTs that can be flipped for profit on OpenSea
+  // Strategy 4: CHEAP MINT detection — contract has a payable mint with price < $0.5
+  // This lets bot mint cheap NFTs that can be flipped for profit on OpenSea.
+  // ALSO check floor price — only mint if floor ≥ $1 (so we can sell for profit).
   const mintPrice = await getContractMintPrice(contractAddress);
   if (mintPrice && mintPrice > 0n && mintPrice <= MAX_CHEAP_MINT_PRICE) {
+    // Check OpenSea floor price — must be at least 2x mint price for profit
+    // (mint price + OpenSea fees 2.5% + gas for listing)
+    const minSellPriceWei = mintPrice * 3n; // 3x mint price = profit target
+    const floorPrice = await getOpenSeaFloorPrice(contractAddress);
+
+    if (floorPrice !== null && floorPrice >= minSellPriceWei) {
+      // Cheap mint with profitable floor — MINT IT!
+      return {
+        functionName: 'mint',
+        args: [],
+        source: 'cheap' as const,
+        value: mintPrice,
+      };
+    } else if (floorPrice !== null && floorPrice < minSellPriceWei) {
+      // Floor price too low — can't sell for profit, skip
+      return null;
+    }
+    // If floorPrice is null (unknown), still try mint — risky but may work
     return {
       functionName: 'mint',
       args: [],
