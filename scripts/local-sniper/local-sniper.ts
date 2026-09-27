@@ -41,16 +41,17 @@ import { getClientsForChain, type ChainKey } from '@/lib/pimlico';
 import { isAlchemyConfiguredAsync } from '@/lib/alchemy-scanner';
 
 // ============================================================================
-// CONFIGURATION — MAXIMUM OVERDRIVE (300% power) v3 — Smart Backoff
+// CONFIGURATION — MAXIMUM OVERDRIVE v4 (500% power, 3 chains focus)
 // ============================================================================
 
 const SCAN_INTERVAL_MS = 3_000;          // 3 сек между сканов (normal)
 const SCAN_INTERVAL_BACKOFF_MS = 15_000;  // 15 сек когда нет новых кандидатов (smart backoff)
-const MAX_MINTS_PER_CYCLE = 50;            // 50 ментов за цикл (было 20)
-const MAX_CANDIDATES_PER_SCAN = 200;       // 200 кандидатов за скан (было 50)
+const MAX_MINTS_PER_CYCLE = 100;            // 100 ментов за цикл (было 50) — DOUBLE!
+const MAX_CANDIDATES_PER_SCAN = 300;       // 300 кандидатов за скан (было 200)
 const DASHBOARD_REFRESH_MS = 500;          // refresh каждые 500ms
-const PARALLEL_MINT_BATCH_SIZE = 5;        // 5 параллельных mint attempts (было sequential)
-const SCAN_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'];
+const PARALLEL_MINT_BATCH_SIZE = 10;        // 10 параллельных mint attempts (было 5) — DOUBLE!
+// Only 3 chains where Smart Account has ETH — skip polygon/ethereum (no ETH = skip)
+const SCAN_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum'];
 
 // ============================================================================
 // ANSI COLORS — для красивого терминального вывода
