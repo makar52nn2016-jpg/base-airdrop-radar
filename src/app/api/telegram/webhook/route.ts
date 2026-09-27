@@ -456,6 +456,10 @@ Error: ${result.error?.slice(0, 200)}`;
     }
 
     default:
-      return `❓ Unknown command. Send /help for the list.`;
+      // Handle removed commands gracefully
+      if (command === '/liquidations' || command === '/unhealthy') {
+        return `⚠️ This command was removed. The bot now focuses 100% on NFT sniping.\n\nSend /menu to see available buttons.`;
+      }
+      return `❓ Unknown command: \`${command}\`\n\n*Available commands:*\n/menu — show buttons\n/status — bot stats\n/scan — trigger scan\n/run — scan + mint\n/recent — last mints\n/balance — wallet\n/chains — 5 addresses\n/portfolio — NFTs\n/health — diagnostics\n/mint 0xABC — manual mint\n/help — full list`;
   }
 }

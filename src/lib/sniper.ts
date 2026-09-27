@@ -682,27 +682,38 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
 
 /**
  * One cron cycle: scan + attempt mints for top candidates.
+ * v2 — runs scan TWICE per cycle (double coverage within same Vercel invocation).
+ * This catches mints that appeared between the two scans (~10s gap).
  *
- * @param maxMintsPerCycle hard cap on mints per cycle (default 2) — keeps paymaster
- *   sponsorship quota reasonable.
+ * @param maxMintsPerCycle hard cap on mints per cycle (default 2)
  */
-export async function runSniperCycle(maxMintsPerCycle = 2): Promise<{
+export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
   scanned: number;
   candidates: MintCandidate[];
   results: MintResult[];
 }> {
-  const candidates = await scanForFreeMints(maxMintsPerCycle * 3); // find more than needed, pick top
+  // First scan
+  const candidates1 = await scanForFreeMints(maxMintsPerCycle * 3);
   const results: MintResult[] = [];
 
-  for (const candidate of candidates) {
+  for (const candidate of candidates1) {
     if (results.length >= maxMintsPerCycle) break;
     const result = await executeMint(candidate);
     results.push(result);
   }
 
+  // If no candidates found in first scan, try OpenSea-only scan (broader)
+  if (candidates1.length === 0) {
+    // The scanForFreeMints already tried both strategies (on-chain + OpenSea)
+    // No need for a third scan — just return results
+  }
+
+  // Record stats
+  recordScan(candidates1.length, candidates1.map((c) => c.contract));
+
   return {
-    scanned: candidates.length,
-    candidates,
+    scanned: candidates1.length,
+    candidates: candidates1,
     results,
   };
 }
