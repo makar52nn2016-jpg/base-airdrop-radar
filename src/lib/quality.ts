@@ -13,18 +13,7 @@ import { getCollectionDetail } from '@/lib/opensea';
  * Returns true if contract looks spammy (should skip).
  */
 
-const SPAM_NAME_KEYWORDS = [
-  'test',
-  'spam',
-  'fake',
-  'scam',
-  'phishing',
-  'free claim', // common spam pattern
-  'unlimited',
-  'mint anything',
-  '1000000',
-  '0000000',
-];
+const SPAM_NAME_KEYWORDS: string[] = []; // DISABLED — user wants to catch EVERYTHING
 
 export interface QualityCheckResult {
   isSpam: boolean;

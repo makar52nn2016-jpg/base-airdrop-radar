@@ -297,7 +297,7 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   // mainnet.base.org and mainnet.optimism.io DON'T support address-less getLogs.
   // OpenSea API catches mints on ALL chains and is reliable.
   try {
-    const events = await getRecentBaseTransfers(100, 6 * 3600, 1);
+    const events = await getRecentBaseTransfers(100, 6 * 3600, 3);
     const mintContracts = filterMintEventsForChains(events, [
       'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
     ]);

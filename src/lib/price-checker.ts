@@ -48,10 +48,13 @@ export async function checkMintPrice(
     client: publicClient,
   });
 
-  // Try each price function
+  // Try each price function — expanded list
   const priceFunctions = [
     'price', 'mintPrice', 'cost', 'getPrice',
     'freePrice', 'publicPrice',
+    'currentPrice', 'tokenPrice', 'mintRate',
+    'getMintPrice', 'mintCost', 'fee',
+    'mintFee', 'publicMintPrice',
   ];
 
   for (const fn of priceFunctions) {

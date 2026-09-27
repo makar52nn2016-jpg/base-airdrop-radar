@@ -355,29 +355,30 @@ export async function looksLikeContract(address: string): Promise<boolean> {
  */
 export async function findFreeMintFunction(
   contractAddress: string
-): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback'; abiInputs?: any[] } | null> {
-  // Strategy 1: Price-aware detection (FAST — 6 RPC calls)
-  // Read price()/mintPrice()/cost() — if 0 → free mint!
-  // This is the FASTEST strategy and catches the most free mints.
+): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback' | 'blind'; abiInputs?: any[] } | null> {
+  // Strategy 1: Price-aware detection (6 RPC calls)
   const priceResult = await findFreeMintViaPriceCheck(contractAddress);
   if (priceResult) {
     return { ...priceResult, source: 'fallback' };
   }
 
-  // Strategy 2: Basescan verified ABI (1 HTTP call — fast)
+  // Strategy 2: Basescan verified ABI (1 HTTP call)
   const basescanResult = await findFreeMintViaBasescanAbi(contractAddress);
   if (basescanResult) {
     return { ...basescanResult, source: 'basescan' };
   }
 
-  // Strategy 3: Top-10 most common signatures (10 staticCalls — fast)
-  // Reduced from 100+ to 10 for speed (was causing 55s scans)
+  // Strategy 3: Top-10 common signatures (10 staticCalls)
   const fastFallbackResult = await findFreeMintViaFastFallback(contractAddress);
   if (fastFallbackResult) {
     return { ...fastFallbackResult, source: 'fallback' };
   }
 
-  return null;
+  // Strategy 4: BLIND MINT — try mint() even if we can't verify it's free!
+  // If the contract has a mint function but we can't determine price,
+  // just TRY to mint. If it's free → success. If it's paid → tx reverts
+  // (gasless via Paymaster, nothing lost except quota).
+  return { functionName: 'mint', args: [], source: 'blind' as const };
 }
 
 /**
