@@ -208,6 +208,9 @@ let LAST_MINT_TIMESTAMP: number | null = null;
 // Now ~1 heartbeat/hour on 1-min cron (was 6/hour).
 const HEARTBEAT_INTERVAL = 60;
 
+// Track if social scanner error was already logged (avoid log spam)
+let socialScanErrorLogged = false;
+
 /**
  * Pimlico's custom EntryPoint addresses on L2 chains.
  *
@@ -671,7 +674,11 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
   }
 
   // Strategy 3: Social Signal Scanner (PROACTIVE — searches social media)
-  if (candidates.length < maxCandidates) {
+  // v2: disabled by default if .z-ai-config missing or DISABLE_SOCIAL_SCAN=1 set
+  // social-scanner uses z-ai-web-dev-sdk which requires .z-ai-config file
+  // Without it, web_search calls spam logs with "Configuration file not found"
+  const disableSocialScan = process.env.DISABLE_SOCIAL_SCAN === '1' || process.env.DISABLE_SOCIAL_SCAN === 'true';
+  if (!disableSocialScan && candidates.length < maxCandidates) {
     try {
       const { scanSocialMediaForMints } = await import('@/lib/social-scanner');
       const socialCandidates = await scanSocialMediaForMints(maxCandidates - candidates.length);
@@ -684,9 +691,17 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
         candidates.push(c);
       }
     } catch (err: any) {
-      logError(`Social scan failed: ${err.message?.slice(0, 80)}`);
+      // Silent fail — don't spam logs with .z-ai-config errors
+      // Only log once per session (suppressed via static flag)
+      if (!socialScanErrorLogged) {
+        socialScanErrorLogged = true;
+        logError(`Social scan disabled (set DISABLE_SOCIAL_SCAN=1 in .env.local to silence this). Error: ${err.message?.slice(0, 60)}`);
+      }
     }
   }
+  // Track if we've already logged social scanner error (avoid log spam)
+  // Module-level flag, resets on cold start
+
 
   // Strategy 4: Whale Copy-Minting (SMART — copies pro farmers)
   if (candidates.length < maxCandidates) {
