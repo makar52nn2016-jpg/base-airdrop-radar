@@ -170,6 +170,7 @@ export async function initSmartAccount(chainKey: ChainKey = 'base') {
   return {
     smartAccount,
     smartAccountClient,
+    bundlerClient: bc,
     signer,
     smartAccountAddress: smartAccount.address,
     chainKey,
@@ -757,7 +758,35 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
 
   try {
     const chainKey = candidate.chain || 'base';
-    const { smartAccountClient, smartAccountAddress, chainConfig } = await initSmartAccount(chainKey);
+    const { smartAccountClient, smartAccountAddress, chainConfig, bundlerClient: bc } = await initSmartAccount(chainKey);
+
+    // Fetch current gas prices from Pimlico before mint.
+    // CRITICAL: viem 2.56.9's getPaymasterStubData does NOT default
+    // maxFeePerGas/maxPriorityFeePerGas to '0x0' — they remain undefined.
+    // Pimlico's validator then rejects the UserOp with:
+    //   "Validation error: expected string, received undefined at params[0].userOp.maxFeePerGas"
+    // We fetch standard gas price proactively and pass it explicitly to writeContract.
+    let gasPrice: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | undefined;
+    try {
+      const { getUserOperationGasPrice } = await import('permissionless/actions/pimlico');
+      const prices = await getUserOperationGasPrice(bc as any);
+      gasPrice = {
+        maxFeePerGas: prices.standard.maxFeePerGas,
+        maxPriorityFeePerGas: prices.standard.maxPriorityFeePerGas,
+      };
+      logActivity({
+        type: 'chain_scan',
+        message: `Gas price fetched: ${gasPrice.maxFeePerGas} / ${gasPrice.maxPriorityFeePerGas}`,
+        chain: chainKey,
+      });
+    } catch (e: any) {
+      // Don't fail the mint just because gas price fetch failed — try without it
+      logActivity({
+        type: 'error',
+        message: `Gas price fetch failed: ${e?.message?.slice(0, 60)}`,
+        chain: chainKey,
+      });
+    }
 
     // Build the right ABI for the call:
     // - If we have Basescan-detected inputs, build a minimal ABI for just that function
@@ -777,12 +806,20 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
       abi = FREE_MINT_ABI;
     }
 
-    const txHash = await smartAccountClient.writeContract({
-      address: candidate.contract as `0x${string}`,
-      abi,
-      functionName: candidate.functionName,
-      args: candidate.args as any[],
-    });
+    const txHash = await smartAccountClient.writeContract(
+      {
+        address: candidate.contract as `0x${string}`,
+        abi,
+        functionName: candidate.functionName,
+        args: candidate.args as any[],
+      },
+      gasPrice
+        ? {
+            maxFeePerGas: gasPrice.maxFeePerGas,
+            maxPriorityFeePerGas: gasPrice.maxPriorityFeePerGas,
+          }
+        : undefined
+    );
 
     const result: MintResult = {
       candidate,
