@@ -22,7 +22,7 @@ import {
   getAssetContractInfo,
   getCollectionDetail,
 } from '@/lib/opensea';
-import { findFreeMintFunction, FREE_MINT_ABI } from '@/lib/basescan';
+import { findFreeMintFunction, findClaimFunction, FREE_MINT_ABI } from '@/lib/basescan';
 import {
   recordScan,
   recordMintAttempt,
@@ -500,13 +500,12 @@ async function sendListingLinkAfterReceipt(
     // This is the "Option 3" full automation — bot creates the listing itself.
     try {
       const { createOpenSeaListing } = await import('@/lib/seaport');
-      const isErc1155 = mintLogs[0].topics?.[0] === TRANSFER_EVENT_TOPIC; // same event for ERC-721, but ERC-1155 uses different
       const listingResult = await createOpenSeaListing({
         nftContract: candidate.contract,
         tokenId,
         priceEth: listingPriceEth,
         chainKey,
-        isErc1155: false, // ERC-721 by default (ERC-1155 auto-listing is harder)
+        isErc1155: false,
         collectionName: candidate.name,
       });
 
@@ -526,10 +525,69 @@ async function sendListingLinkAfterReceipt(
         });
       }
     } catch (e: any) {
-      // Auto-listing is best-effort — don't fail the whole flow
       logActivity({
         type: 'error',
         message: `Auto-list exception: ${e.message?.slice(0, 80)}`,
+        chain: chainKey,
+      });
+    }
+
+    // AUTO-CLAIM: check if the NFT contract has claimable ERC-20 tokens
+    // Many NFT collections distribute tokens to holders via claim()/harvest()/getReward()
+    try {
+      const claimResult = await findClaimFunction(
+        candidate.contract,
+        tokenId,
+        smartAccountAddress
+      );
+
+      if (claimResult) {
+        // Build ABI for the claim function
+        let claimAbi: any;
+        if (Array.isArray(claimResult.abiInputs)) {
+          claimAbi = [{
+            type: 'function',
+            name: claimResult.functionName,
+            inputs: claimResult.abiInputs,
+            outputs: [],
+            stateMutability: 'nonpayable',
+          }];
+        } else {
+          claimAbi = FREE_MINT_ABI;
+        }
+
+        const { smartAccountClient: claimClient } = await initSmartAccount(chainKey);
+
+        const claimTxHash = await claimClient.writeContract({
+          address: candidate.contract as `0x${string}`,
+          abi: claimAbi,
+          functionName: claimResult.functionName,
+          args: claimResult.args as any[],
+        });
+
+        logActivity({
+          type: 'mint_success',
+          message: `Claimed tokens via ${claimResult.functionName}() — tx: ${claimTxHash?.slice(0, 16)}...`,
+          chain: chainKey,
+          contract: candidate.contract,
+          txHash: claimTxHash,
+        });
+
+        // Send Telegram notification
+        await sendTelegramMessage(`💰 *Tokens Claimed!*
+
+📦 *Collection:* ${candidate.name}
+🔗 *Function:* \`${claimResult.functionName}()\`
+⛓ *Chain:* ${chainKey}
+🎫 *Tx:* [${claimTxHash.slice(0, 16)}...](${`https://${chainKey}scan.org/tx/${claimTxHash}`})
+
+Tokens sent to Smart Account. Swap to ETH on a DEX (Aerodrome/Uniswap) to realize profit.`);
+      }
+    } catch (e: any) {
+      // Auto-claim is best-effort — don't fail if it errors
+      logActivity({
+        type: 'error',
+        message: `Auto-claim failed: ${e.message?.slice(0, 80)}`,
         chain: chainKey,
       });
     }

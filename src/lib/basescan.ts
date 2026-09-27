@@ -154,6 +154,153 @@ export const FREE_MINT_ABI = parseAbi([
 ]);
 
 /**
+ * Tries to find and call a claim/reward function on an NFT contract.
+ * Many NFT collections distribute ERC-20 tokens to holders via claim() functions.
+ *
+ * Detection strategy:
+ *   1. Basescan ABI lookup — find any function with claim/reward/harvest/collect keyword
+ *   2. Fallback — try common claim function signatures
+ *
+ * @param contractAddress NFT contract address
+ * @param tokenId NFT token ID (some claim functions need it as arg)
+ * @param holderAddress Smart Account address (for functions that take address arg)
+ * @returns { functionName, args, abiInputs, tokenContract?, source } if claimable, null otherwise
+ */
+export async function findClaimFunction(
+  contractAddress: string,
+  tokenId?: string,
+  holderAddress?: string
+): Promise<{
+  functionName: string;
+  args: unknown[];
+  abiInputs?: any[];
+  source: 'basescan' | 'fallback';
+} | null> {
+  const toAddress = (holderAddress || '0x0000000000000000000000000000000000000001') as `0x${string}`;
+
+  // Strategy 1: Basescan verified ABI
+  const abi = await getContractAbi(contractAddress);
+  if (abi && Array.isArray(abi)) {
+    const CLAIM_KEYWORDS = ['claim', 'reward', 'harvest', 'collect', 'stake', 'unstake', 'airdrop', 'distribute'];
+    const claimCandidates: { functionName: string; inputs: any[] }[] = [];
+
+    for (const item of abi) {
+      if (item.type !== 'function') continue;
+      if (item.stateMutability === 'view' || item.stateMutability === 'pure') continue;
+
+      const nameLower = (item.name || '').toLowerCase();
+      const isClaim = CLAIM_KEYWORDS.some((kw) => nameLower.includes(kw));
+      if (!isClaim) continue;
+
+      claimCandidates.push({ functionName: item.name, inputs: item.inputs || [] });
+    }
+
+    for (const c of claimCandidates) {
+      const args: unknown[] = [];
+      let skip = false;
+
+      for (const input of c.inputs) {
+        const t = input.type;
+        if (t === 'address') args.push(toAddress);
+        else if (t === 'uint256') args.push(tokenId ? BigInt(tokenId) : 1n);
+        else if (t === 'uint8' || t === 'uint16') args.push(1);
+        else if (t === 'bool') args.push(true);
+        else if (t === 'string') args.push('');
+        else if (t.startsWith('bytes')) args.push('0x');
+        else if (t.startsWith('uint') || t.startsWith('int')) args.push(tokenId ? BigInt(tokenId) : 1n);
+        else { skip = true; break; }
+      }
+
+      if (skip) continue;
+
+      try {
+        const fnAbi = [{
+          type: 'function',
+          name: c.functionName,
+          inputs: c.inputs,
+          outputs: [],
+          stateMutability: 'nonpayable',
+        }];
+        const contract = getContract({
+          address: contractAddress as `0x${string}`,
+          abi: fnAbi as any,
+          client: publicClient,
+        });
+        const fn = (contract as any)[c.functionName];
+        if (!fn) continue;
+        await fn.read.staticCall(args);
+        return { functionName: c.functionName, args, abiInputs: c.inputs, source: 'basescan' };
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  // Strategy 2: Fallback — common claim signatures
+  const CLAIM_ABI = parseAbi([
+    'function claim() public',
+    'function claim(uint256 tokenId) public',
+    'function claim(address to) public',
+    'function claim(address to, uint256 tokenId) public',
+    'function claimReward() public',
+    'function claimReward(uint256 tokenId) public',
+    'function claimTokens() public',
+    'function claimTokens(uint256 tokenId) public',
+    'function claimAirdrop() public',
+    'function claimAirdrop(uint256 tokenId) public',
+    'function getReward() public',
+    'function getReward(uint256 tokenId) public',
+    'function harvest() public',
+    'function harvest(uint256 tokenId) public',
+    'function collect() public',
+    'function collect(uint256 tokenId) public',
+    'function stake(uint256 tokenId) public',
+    'function unstake(uint256 tokenId) public',
+  ]);
+
+  const contract = getContract({
+    address: contractAddress as `0x${string}`,
+    abi: CLAIM_ABI,
+    client: publicClient,
+  });
+
+  const candidates: { functionName: string; args: unknown[] }[] = [
+    { functionName: 'claim', args: [] },
+    { functionName: 'claimReward', args: [] },
+    { functionName: 'claimTokens', args: [] },
+    { functionName: 'claimAirdrop', args: [] },
+    { functionName: 'getReward', args: [] },
+    { functionName: 'harvest', args: [] },
+    { functionName: 'collect', args: [] },
+  ];
+
+  if (tokenId) {
+    candidates.push(
+      { functionName: 'claim', args: [BigInt(tokenId)] },
+      { functionName: 'claimReward', args: [BigInt(tokenId)] },
+      { functionName: 'claimTokens', args: [BigInt(tokenId)] },
+      { functionName: 'claimAirdrop', args: [BigInt(tokenId)] },
+      { functionName: 'getReward', args: [BigInt(tokenId)] },
+      { functionName: 'harvest', args: [BigInt(tokenId)] },
+      { functionName: 'collect', args: [BigInt(tokenId)] },
+    );
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const fn = (contract as any)[candidate.functionName];
+      if (!fn) continue;
+      await fn.read.staticCall(candidate.args);
+      return { ...candidate, source: 'fallback' };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Common paid-mint signatures (to filter OUT from sniping).
  * If contract has these payable variants, it's a paid mint — but we still
  * attempt the non-payable variant since static-call without value should
