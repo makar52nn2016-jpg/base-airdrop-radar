@@ -63,6 +63,7 @@ export default function DashboardPage() {
   const [runLoading, setRunLoading] = useState(false);
   const [manualAddr, setManualAddr] = useState('');
   const [terminal, setTerminal] = useState<{ts: string; msg: string; type: string}[]>([]);
+  const [displayedTs, setDisplayedTs] = useState<Set<string>>(new Set());
   const terminalRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -70,12 +71,22 @@ export default function DashboardPage() {
       const resp = await fetch('/api/sniper/status', { cache: 'no-store' });
       const data = await resp.json();
       setStatus(data);
-      // Add new events to terminal
+      // Add ONLY NEW events to terminal (dedup by timestamp)
       if (data.activity_log) {
-        const newEvents = data.activity_log.slice(0, 3);
         setTerminal(prev => {
-          const updated = [...newEvents.map(e => ({ts: e.ts, msg: e.message, type: e.type})), ...prev];
-          return updated.slice(0, 50);
+          const newEvents: {ts: string; msg: string; type: string}[] = [];
+          setDisplayedTs(prevTs => {
+            const updated = new Set(prevTs);
+            for (const ev of data.activity_log) {
+              if (!updated.has(ev.ts)) {
+                updated.add(ev.ts);
+                newEvents.push({ts: ev.ts, msg: ev.message, type: ev.type});
+              }
+            }
+            return updated;
+          });
+          if (newEvents.length === 0) return prev;
+          return [...newEvents.reverse(), ...prev].slice(0, 50);
         });
       }
     } catch (e) {
