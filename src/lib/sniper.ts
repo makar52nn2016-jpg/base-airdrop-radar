@@ -38,7 +38,6 @@ import {
   notifyMintSuccess,
   notifyMintFailure,
   notifyListingLink,
-  notifyCandidateFound,
   notifyHeartbeat,
   sendTelegramMessage,
 } from '@/lib/telegram';
@@ -201,7 +200,9 @@ function pruneAttempted(): void {
 // Used to fire heartbeat every Nth scan so user knows cron is alive.
 let SCAN_COUNTER = 0;
 let LAST_MINT_TIMESTAMP: number | null = null;
-const HEARTBEAT_INTERVAL = 10; // every 10 scans (≈10 min if cron = 1 min)
+// v2: increased from 10 to 60 — user complained about heartbeat spam.
+// Now ~1 heartbeat/hour on 1-min cron (was 6/hour).
+const HEARTBEAT_INTERVAL = 60;
 
 /**
  * Pimlico's custom EntryPoint addresses on L2 chains.
@@ -491,18 +492,19 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   // mainnet.base.org and mainnet.optimism.io DON'T support address-less getLogs.
   // OpenSea API catches mints on ALL chains and is reliable.
   //
-  // v2 — REDUCED window from 6h to 30min. Old window kept returning the same
-  // 6 contracts every scan (since OpenSea mints within last 6h don't change
-  // often on Base). 30min window = only fresh mints, less duplication.
+  // v3 — EXPANDED window from 30min back to 6h. With persistent dedup working
+  // (Supabase), we can safely scan wider window — already-attempted contracts
+  // get filtered out. Wider window = more unattempted candidates per scan
+  // = higher chance of catching a free mint when one appears.
   try {
-    const events = await getRecentBaseTransfers(100, 30 * 60, 2);
+    const events = await getRecentBaseTransfers(100, 6 * 3600, 3);
     const mintContracts = filterMintEventsForChains(events, [
       'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
     ]);
 
     logActivity({
       type: 'chain_scan',
-      message: `OpenSea: ${events.length} events (30min window), ${mintContracts.length} mint contracts found`,
+      message: `OpenSea: ${events.length} events (6h window), ${mintContracts.length} mint contracts found`,
     });
 
     for (const { contract: contractAddress, slug, chain } of mintContracts) {
@@ -934,29 +936,14 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     });
   }
 
-  // Pre-mint Telegram notification — fire only if this contract hasn't been
-  // notified in the last hour. Without this, every cold-start cycle would
-  // spam the same 6 contracts in TG (exactly the user's complaint).
-  const chainKeyForNotify = chainKey;
-  if (!isRecentlyNotified(chainKeyForNotify, candidate.contract)) {
-    markNotified(chainKeyForNotify, candidate.contract);
-    void notifyCandidateFound({
-      contract: candidate.contract,
-      functionName: candidate.functionName,
-      chain: chainKeyForNotify,
-      collectionName: candidate.name,
-      source: candidate.source,
-      openseaUrl: candidate.opensea_url,
-    }).catch(() => {});
-  } else {
-    // Silently skip — already notified about this contract recently
-    logActivity({
-      type: 'telegram_sent',
-      message: `Skipping TG for ${candidate.name?.slice(0, 30)} — recently notified`,
-      chain: chainKeyForNotify,
-      contract: candidate.contract,
-    });
-  }
+  // v4: Pre-mint TG notification REMOVED entirely.
+  // User complaint: too many TG messages (~3 per scan = 180/hour).
+  // Now bot is silent during mint attempts — only notifies on:
+  //   ✅ SUCCESS (mint succeeded) — most important!
+  //   ❌ UNEXPECTED errors (filtered — paid reverts are silent)
+  //   💚 Heartbeat every 60 scans (~1 hour on 1-min cron)
+  //   📊 Daily summary at 23:00 UTC via Vercel Cron
+  // Pre-mint activity is still logged in dashboard activityLog for inspection.
 
   try {
     const { smartAccountClient, smartAccountAddress, chainConfig, bundlerClient: bc } = await initSmartAccount(chainKey);
@@ -989,45 +976,112 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
       });
     }
 
-    // Build the right ABI for the call:
-    // - If we have Basescan-detected inputs, build a minimal ABI for just that function
-    // - Otherwise use the hardcoded FREE_MINT_ABI (which has all standard signatures)
-    let abi: any;
-    if (Array.isArray(candidate.abiInputs)) {
-      abi = [
-        {
-          type: 'function',
-          name: candidate.functionName,
-          inputs: candidate.abiInputs,
-          outputs: [],
-          stateMutability: 'nonpayable',
-        },
-      ];
-    } else {
-      abi = FREE_MINT_ABI;
+    // MULTI-FUNCTION MINT: try multiple mint function names in sequence.
+    // v5 — if first function reverts (paid/whitelist/wrong signature),
+    // try alternative function names from FREE_MINT_ABI.
+    // Greatly increases success rate because:
+    //   - Contract might have `publicMint()` instead of `mint()`
+    //   - Contract might have `claim()` instead of `mint()`
+    //   - Some contracts have multiple mint functions, only one is free
+    //
+    // Strategy:
+    //   1. Start with the candidate's detected functionName (from findFreeMintFunction)
+    //   2. If revert, try alternates from this list
+    //   3. Stop on first success
+    const MINT_FUNCTION_ATTEMPTS = [
+      candidate.functionName, // Detected first (highest confidence)
+      'mint',
+      'publicMint',
+      'claim',
+      'freeMint',
+      'claimFree',
+      'mintForFree',
+      'mintFree',
+      'freeClaim',
+      'airdrop',
+      'gift',
+      'drop',
+      'publicClaim',
+    ].filter((v, i, a) => v && a.indexOf(v) === i); // dedup, keep order
+
+    let txHash: `0x${string}` | null = null;
+    let usedFunctionName = candidate.functionName;
+    let lastRevertError: string | null = null;
+
+    for (const fnName of MINT_FUNCTION_ATTEMPTS) {
+      try {
+        // Build ABI for this function. If we have Basescan-detected inputs
+        // AND this is the originally-detected function, use them.
+        // Otherwise use FREE_MINT_ABI which has all standard signatures.
+        let abi: any;
+        if (Array.isArray(candidate.abiInputs) && fnName === candidate.functionName) {
+          abi = [
+            {
+              type: 'function',
+              name: fnName,
+              inputs: candidate.abiInputs,
+              outputs: [],
+              stateMutability: 'nonpayable',
+            },
+          ];
+        } else {
+          abi = FREE_MINT_ABI; // has all standard mint signatures
+        }
+
+        const attemptTx = await smartAccountClient.writeContract(
+          {
+            address: candidate.contract as `0x${string}`,
+            abi,
+            functionName: fnName,
+            args: candidate.args as any[],
+          },
+          gasPrice
+            ? {
+                maxFeePerGas: gasPrice.maxFeePerGas,
+                maxPriorityFeePerGas: gasPrice.maxPriorityFeePerGas,
+              }
+            : undefined
+        );
+
+        // If we get here, mint SUCCEEDED with this function name
+        txHash = attemptTx;
+        usedFunctionName = fnName;
+        break;
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+
+        // If error is "boring" revert, try next function
+        if (isBoringRevertError(errMsg)) {
+          lastRevertError = errMsg;
+          logActivity({
+            type: 'mint_failed_silent',
+            message: `🎲 ${fnName}() reverted on ${candidate.name?.slice(0, 25)} — trying next function`,
+            chain: chainKey,
+            contract: candidate.contract,
+          });
+          continue; // try next function name
+        }
+
+        // Unexpected error — break out and notify (filtered)
+        throw err;
+      }
     }
 
-    const txHash = await smartAccountClient.writeContract(
-      {
-        address: candidate.contract as `0x${string}`,
-        abi,
-        functionName: candidate.functionName,
-        args: candidate.args as any[],
-      },
-      gasPrice
-        ? {
-            maxFeePerGas: gasPrice.maxFeePerGas,
-            maxPriorityFeePerGas: gasPrice.maxPriorityFeePerGas,
-          }
-        : undefined
-    );
+    if (!txHash) {
+      // All function names tried and reverted — paid/whitelist contract
+      throw new Error(
+        `All ${MINT_FUNCTION_ATTEMPTS.length} mint function attempts reverted. Contract is paid/whitelist. ` +
+        `Last error: ${lastRevertError?.slice(0, 100)}`
+      );
+    }
 
     const result: MintResult = {
       candidate,
       success: true,
       txHash,
       smartAccountAddress,
-    };
+      functionName: usedFunctionName,
+    } as MintResult;
 
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
@@ -1038,7 +1092,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     // Notify Telegram (fire-and-forget — don't block on failure)
     void notifyMintSuccess({
       contract: candidate.contract,
-      functionName: candidate.functionName,
+      functionName: usedFunctionName,
       txHash,
       smartAccountAddress,
       collectionName: candidate.name,
