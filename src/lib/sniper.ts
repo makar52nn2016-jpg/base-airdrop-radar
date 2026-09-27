@@ -705,7 +705,7 @@ function isBoringRevertError(errorMsg: string): boolean {
 }
 
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
-  recordMintAttempt();
+  recordMintAttempt(candidate.contract, candidate.chain || 'base');
 
   // Pre-mint Telegram notification — let user see the bot is alive + working
   // For blind-mint candidates, ALWAYS notify (user wants to see attempts)
@@ -757,7 +757,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
-    recordMintSuccess();
+    recordMintSuccess(txHash, candidate.contract, chainKey);
     LAST_MINT_TIMESTAMP = Date.now();
 
     // Notify Telegram (fire-and-forget — don't block on failure)
@@ -786,7 +786,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
-    recordMintFailure();
+    recordMintFailure(errorMsg, candidate.contract, chainKey);
 
     // SPAM FILTER: skip TG notification for "boring" reverts (paid mints, wrong args)
     // These are EXPECTED during blind-mint — would generate 50+ msgs/hour otherwise.
