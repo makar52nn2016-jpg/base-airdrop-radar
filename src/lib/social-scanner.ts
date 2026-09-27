@@ -22,15 +22,18 @@ import { logActivity } from '@/lib/stats';
 import type { MintCandidate } from '@/lib/sniper';
 
 // Search queries — multiple phrases for maximum coverage
+// Improved: more specific, targeting Twitter/X posts and aggregator sites
 const SEARCH_QUERIES = [
-  'free mint base 0x contract',
-  'freemint base blockchain contract address',
-  'base nft free mint today 0x',
-  'base free mint alert',
-  'new base nft mint free',
-  'base free mint contract address 0x',
-  'optimism free mint 0x contract',
-  'arbitrum free mint 0x',
+  '"free mint" base 0x contract 2026',
+  'base nft "free mint" contract address site:x.com',
+  'base free mint live now 0x',
+  'site:twitter.com base freemint 0x',
+  'base chain free nft mint contract 0x',
+  'new base nft free mint today contract',
+  'base gasless mint free nft 0x',
+  '"freemint" base address 0x',
+  'base nft mint free contract site:farcaster.xyz',
+  'base l2 free mint nft address 0x',
 ];
 
 // Regex for Ethereum addresses (0x + 40 hex chars)
@@ -57,8 +60,8 @@ export async function scanSocialMediaForMints(
     message: 'Social signal scan started — searching for free mint announcements',
   });
 
-  // Run multiple search queries in parallel
-  const searchPromises = SEARCH_QUERIES.slice(0, 4).map(async (query) => {
+  // Run multiple search queries in parallel (increased from 4 to 6)
+  const searchPromises = SEARCH_QUERIES.slice(0, 6).map(async (query) => {
     try {
       return await searchWeb(query, 10);
     } catch {

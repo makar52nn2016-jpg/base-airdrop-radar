@@ -404,40 +404,21 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   }
 
   // Strategy 4 (fallback): Top collections from list
+  // v2 — now uses OpenSea floor=0 scanner for targeted free-mint detection
   if (candidates.length === 0) {
-    const collections = await listBaseCollections(50);
-
-    for (const col of collections) {
-      if (candidates.length >= maxCandidates) break;
-      if (ATTEMPTED.has(col.slug)) continue;
-
-      try {
-        const contracts = await getCollectionContracts(col.slug);
-        for (const contractAddress of contracts) {
-          if (candidates.length >= maxCandidates) break;
-          if (tried.has(contractAddress)) continue;
-          tried.add(contractAddress);
-          allScannedAddresses.push(contractAddress);
-
-          const found = await findFreeMintFunction(contractAddress);
-          if (found) {
-            candidates.push({
-              slug: col.slug,
-              name: col.name,
-              contract: contractAddress,
-              functionName: found.functionName,
-              args: found.args,
-              detectedAt: new Date().toISOString(),
-              image_url: col.image_url,
-              opensea_url: col.opensea_url,
-              source: found.source,
-              abiInputs: found.abiInputs,
-            });
-          }
-        }
-      } catch (err) {
-        continue;
+    try {
+      const { scanOpenSeaFloorZero } = await import('@/lib/opensea-scanner');
+      const floorCandidates = await scanOpenSeaFloorZero(maxCandidates, 15);
+      for (const c of floorCandidates) {
+        if (candidates.length >= maxCandidates) break;
+        const dedupKey = `floor0:${c.contract}`;
+        if (tried.has(dedupKey)) continue;
+        tried.add(dedupKey);
+        allScannedAddresses.push(c.contract);
+        candidates.push(c);
       }
+    } catch (err: any) {
+      logError(`OpenSea floor=0 scan failed: ${err.message?.slice(0, 80)}`);
     }
   }
 
