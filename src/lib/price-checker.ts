@@ -64,8 +64,10 @@ export async function checkMintPrice(
       const value = await result.read();
       if (value === 0n) {
         // Price is 0 → mint is currently FREE!
-        return { priceFunction: fn, priceValue: 0n };
+        return { priceFunction: fn, priceValue: 0n, isFree: true };
       }
+      // Price is non-zero → return it (for cheap mint detection)
+      return { priceFunction: fn, priceValue: value as bigint, isFree: false };
     } catch {
       continue;
     }

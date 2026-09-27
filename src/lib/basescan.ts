@@ -353,10 +353,43 @@ export async function looksLikeContract(address: string): Promise<boolean> {
  *
  * Returns the function name + args if a callable function is found.
  */
+
+// Max price for "cheap mint" strategy (0.001 ETH = ~$3). If contract's mint
+// price is below this threshold, bot will try to mint with msg.value = price.
+const MAX_CHEAP_MINT_PRICE = 1_000_000_000_000n; // 0.001 ETH in wei
+
+/**
+ * Reads mint price from a contract via price()/cost()/mintPrice() functions.
+ * Returns 0n if price is 0 (free) or not found.
+ * Returns price in wei if contract has a non-zero price.
+ */
+async function getContractMintPrice(contractAddress: string): Promise<bigint | null> {
+  try {
+    const { checkMintPrice } = await import('@/lib/price-checker');
+    const priceInfo = await checkMintPrice(contractAddress);
+    if (!priceInfo) return null;
+    return priceInfo.priceValue ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Finds the mint function for a contract, considering both free and cheap mints.
+ *
+ * Strategies:
+ *   1. Price-aware detection (free mints with price = 0)
+ *   2. Basescan verified ABI
+ *   3. Top-10 common signatures (static calls)
+ *   4. Cheap mint detection (price < 0.001 ETH)
+ *   5. Blind mint as last resort
+ *
+ * @returns Mint function info with optional `value` field for paid mints
+ */
 export async function findFreeMintFunction(
   contractAddress: string
-): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback' | 'blind'; abiInputs?: any[] } | null> {
-  // Strategy 1: Price-aware detection (6 RPC calls)
+): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback' | 'blind' | 'cheap'; abiInputs?: any[]; value?: bigint } | null> {
+  // Strategy 1: Price-aware detection (6 RPC calls) — finds FREE mints (price = 0)
   const priceResult = await findFreeMintViaPriceCheck(contractAddress);
   if (priceResult) {
     return { ...priceResult, source: 'fallback' };
@@ -374,7 +407,19 @@ export async function findFreeMintFunction(
     return { ...fastFallbackResult, source: 'fallback' };
   }
 
-  // Strategy 4: BLIND MINT — try mint() even if we can't verify it's free!
+  // Strategy 4: CHEAP MINT detection — contract has a payable mint with price < 0.001 ETH
+  // This lets bot mint cheap NFTs that can be flipped for profit on OpenSea
+  const mintPrice = await getContractMintPrice(contractAddress);
+  if (mintPrice && mintPrice > 0n && mintPrice <= MAX_CHEAP_MINT_PRICE) {
+    return {
+      functionName: 'mint',
+      args: [],
+      source: 'cheap' as const,
+      value: mintPrice,
+    };
+  }
+
+  // Strategy 5: BLIND MINT — try mint() even if we can't verify it's free!
   // If the contract has a mint function but we can't determine price,
   // just TRY to mint. If it's free → success. If it's paid → tx reverts
   // (gasless via Paymaster, nothing lost except quota).

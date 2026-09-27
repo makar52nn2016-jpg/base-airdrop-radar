@@ -63,12 +63,19 @@ export interface MintCandidate {
   detectedAt: string;
   image_url: string | null;
   opensea_url: string;
-  /** Source of mint-function detection: 'basescan' (verified ABI) | 'fallback' (hardcoded) */
-  source?: 'basescan' | 'fallback';
+  /** Source of mint-function detection: 'basescan' (verified ABI) | 'fallback' (hardcoded) | 'blind' | 'cheap' */
+  source?: 'basescan' | 'fallback' | 'blind' | 'cheap';
   /** Function inputs from Basescan ABI (used to build correct ABI for writeContract) */
   abiInputs?: any[];
   /** Chain identifier (base, optimism, arbitrum, polygon, ethereum) */
   chain?: ChainKey;
+  /**
+   * Optional msg.value for paid mints (cheap mint strategy).
+   * If set, writeContract will pass this as msg.value (payable function).
+   * Limit: 0.001 ETH (~$3) — only cheap mints, not expensive paid mints.
+   * If undefined, mint is treated as free (msg.value = 0).
+   */
+  value?: bigint;
   /** Collection floor price in native token (e.g. ETH), if known */
   floorPrice?: number | null;
 }
@@ -507,6 +514,7 @@ async function scanRecentMintsViaLogs(
           opensea_url: `https://opensea.io/assets/${chainConfig.openSeaChain}/${contractAddress}`,
           source: found.source,
           abiInputs: found.abiInputs,
+          value: found.value, // For cheap mints: msg.value to pass
           chain: chainKey,
         });
       }
@@ -615,6 +623,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
           opensea_url: `https://opensea.io/assets/${chain}/${contractAddress}`,
           source: found.source,
           abiInputs: found.abiInputs,
+          value: found.value, // For cheap mints: msg.value to pass
           chain: chainKey,
         });
       }
@@ -715,6 +724,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
               opensea_url: `https://opensea.io/assets/${alchemyChain === 'matic' ? 'matic' : alchemyChain}/${contractAddress}`,
               source: found.source,
               abiInputs: found.abiInputs,
+              value: found.value, // For cheap mints: msg.value to pass
               chain: chainKey,
             });
           }
@@ -1173,6 +1183,9 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
             abi,
             functionName: fnName,
             args: candidate.args as any[],
+            // Pass msg.value if candidate has value set (cheap mint strategy)
+            // For free mints (candidate.value undefined), msg.value stays 0
+            value: candidate.value ?? undefined,
           },
           gasPrice
             ? {
