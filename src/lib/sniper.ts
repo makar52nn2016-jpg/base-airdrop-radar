@@ -156,6 +156,35 @@ export async function initSmartAccount(chainKey: ChainKey = 'base') {
       `https://api.pimlico.io/v2/${chainKey}/rpc?apikey=${process.env.PIMLICO_API_KEY}`
     ),
     paymaster: pmc,
+    // CRITICAL: viem 2.56.9 has a bug where passing maxFeePerGas to writeContract
+    // doesn't actually populate the UserOp. The 'fees' step's IIFE returns
+    // `request` UNCHANGED when params already have maxFeePerGas as bigint, so
+    // request never gets the gas fields merged in. Pimlico then rejects the
+    // paymaster call with -32601 'Validation error: expected string, received
+    // undefined at params[0].userOp.maxFeePerGas'.
+    //
+    // Workaround: provide a custom `estimateFeesPerGas` hook that fetches real
+    // gas prices from Pimlico and returns them. This bypasses viem's broken
+    // default fee estimation.
+    userOperation: {
+      estimateFeesPerGas: async () => {
+        try {
+          const { getUserOperationGasPrice } = await import('permissionless/actions/pimlico');
+          const prices = await getUserOperationGasPrice(bc as any);
+          return {
+            maxFeePerGas: prices.standard.maxFeePerGas,
+            maxPriorityFeePerGas: prices.standard.maxPriorityFeePerGas,
+          };
+        } catch {
+          // Fallback to a reasonable value if Pimlico gas price fails
+          // 0.001 gwei * 2 for buffer = 0.002 gwei = 2000000 wei
+          return {
+            maxFeePerGas: 2000000n,
+            maxPriorityFeePerGas: 1000000n,
+          };
+        }
+      },
+    },
   };
 
   const sponsorPolicyId = process.env.PIMLICO_SPONSOR_POLICY_ID;
