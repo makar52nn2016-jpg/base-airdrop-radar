@@ -39,7 +39,6 @@ import {
   notifyMintFailure,
   notifyListingLink,
   notifyCandidateFound,
-  notifyScanSummary,
   notifyHeartbeat,
   sendTelegramMessage,
 } from '@/lib/telegram';
@@ -1105,17 +1104,10 @@ export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
 
     recordScan((candidates1 || []).length, []);
 
-    // Send scan summary ONLY when there were candidates or mints attempted
-    // (skip when scan returned 0 candidates to avoid 1440 silent msgs per day)
-    if ((candidates1 || []).length > 0 || results.length > 0) {
-      void notifyScanSummary({
-        candidatesFound: (candidates1 || []).length,
-        mintsAttempted: results.length,
-        mintsSucceeded: succeeded,
-        mintsFailed: failed,
-        scannedContracts: (candidates1 || []).length,
-      }).catch(() => {});
-    }
+    // v2: scan summary TG removed — it was spamming 1 msg/minute (same as pre-mint).
+    // Pre-mint TG + heartbeat + success/error TG cover user visibility.
+    // User was complaining about TG spam, so removing this notification entirely.
+    // The activityLog (visible in dashboard) still records scan summaries.
 
     return {
       scanned: (candidates1 || []).length,
