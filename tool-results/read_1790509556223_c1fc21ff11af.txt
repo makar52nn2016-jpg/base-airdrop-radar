@@ -1,0 +1,795 @@
+     1→     1→import { createSmartAccountClient } from 'permissionless';
+     2→     2→import { toSafeSmartAccount } from 'permissionless/accounts';
+     3→     3→import { privateKeyToAccount } from 'viem/accounts';
+     4→     4→import { base, baseSepolia } from 'viem/chains';
+     5→     5→import { http, parseEventLogs } from 'viem';
+     6→     6→import { getContract, parseAbi } from 'viem';
+     7→     7→import {
+     8→     8→  bundlerClient,
+     9→     9→  paymasterClient,
+    10→    10→  publicClient,
+    11→    11→  getSignerPrivateKey,
+    12→    12→  getClientsForChain,
+    13→    13→  CHAIN_CONFIGS,
+    14→    14→  ALL_CHAINS,
+    15→    15→  type ChainKey,
+    16→    16→} from '@/lib/pimlico';
+    17→    17→import {
+    18→    18→  listBaseCollections,
+    19→    19→  getCollectionContracts,
+    20→    20→  getRecentBaseTransfers,
+    21→    21→  filterMintEventsForChains,
+    22→    22→  getAssetContractInfo,
+    23→    23→  getCollectionDetail,
+    24→    24→} from '@/lib/opensea';
+    25→    25→import { findFreeMintFunction, findClaimFunction, FREE_MINT_ABI } from '@/lib/basescan';
+    26→    26→import {
+    27→    27→  recordScan,
+    28→    28→  recordMintAttempt,
+    29→    29→  recordMintSuccess,
+    30→    30→  recordMintFailure,
+    31→    31→  logScanStart,
+    32→    32→  logChainScan,
+    33→    33→  logCandidateFound,
+    34→    34→  logError,
+    35→    35→  logActivity,
+    36→    36→} from '@/lib/stats';
+    37→    37→import { notifyMintSuccess, notifyMintFailure, notifyListingLink } from '@/lib/telegram';
+    38→    38→import { checkContractQuality, isSpammyName } from '@/lib/quality';
+    39→    39→
+    40→    40→/**
+    41→    41→ * Core sniper logic.
+    42→    42→ *
+    43→    43→ * Pipeline:
+    44→    44→ *   1. scanForFreeMints()   — fetches recent Base collections, returns candidates with free mint
+    45→    45→ *   2. executeMint()         — for a candidate, mints via Pimlico Smart Account (gasless)
+    46→    46→ *   3. runSniperCycle()      — orchestrates scan + mint, called by cron
+    47→    47→ *
+    48→    48→ * State is in-memory — survives between cron calls only on warm Vercel instances.
+    49→    49→ */
+    50→    50→
+    51→    51→export interface MintCandidate {
+    52→    52→  slug: string;
+    53→    53→  name: string;
+    54→    54→  contract: string;
+    55→    55→  functionName: string;
+    56→    56→  args: unknown[];
+    57→    57→  detectedAt: string;
+    58→    58→  image_url: string | null;
+    59→    59→  opensea_url: string;
+    60→    60→  /** Source of mint-function detection: 'basescan' (verified ABI) | 'fallback' (hardcoded) */
+    61→    61→  source?: 'basescan' | 'fallback';
+    62→    62→  /** Function inputs from Basescan ABI (used to build correct ABI for writeContract) */
+    63→    63→  abiInputs?: any[];
+    64→    64→  /** Chain identifier (base, optimism, arbitrum, polygon, ethereum) */
+    65→    65→  chain?: ChainKey;
+    66→    66→  /** Collection floor price in native token (e.g. ETH), if known */
+    67→    67→  floorPrice?: number | null;
+    68→    68→}
+    69→    69→
+    70→    70→export interface MintResult {
+    71→    71→  candidate: MintCandidate;
+    72→    72→  success: boolean;
+    73→    73→  txHash?: string;
+    74→    74→  smartAccountAddress?: string;
+    75→    75→  error?: string;
+    76→    76→}
+    77→    77→
+    78→    78→// In-memory log of recent mints (max 100 entries, oldest first evicted).
+    79→    79→// This survives only on warm Vercel instances. For real persistence, use Supabase later.
+    80→    80→const RECENT_MINTS: MintResult[] = [];
+    81→    81→const MAX_LOG_SIZE = 100;
+    82→    82→
+    83→    83→// Already-attempted contracts (avoid retrying within same warm session).
+    84→    84→const ATTEMPTED = new Set<string>();
+    85→    85→
+    86→    86→/**
+    87→    87→ * Initializes the Pimlico Smart Account from the configured signer key.
+    88→    88→ * Returns the smartAccount (with bundler client) and the derived address.
+    89→    89→ *
+    90→    90→ * v2 — supports multiple chains. Pass chainKey to init on a specific chain.
+    91→    91→ * Each chain has a different Smart Account address (different Safe factory).
+    92→    92→ *
+    93→    93→ * Default: chainKey='base' for backward compat.
+    94→    94→ */
+    95→    95→export async function initSmartAccount(chainKey: ChainKey = 'base') {
+    96→    96→  const privateKey = getSignerPrivateKey();
+    97→    97→  const signer = privateKeyToAccount(privateKey);
+    98→    98→  const { publicClient: pc, bundlerClient: bc, paymasterClient: pmc } = getClientsForChain(chainKey);
+    99→    99→
+   100→   100→  const smartAccount = await toSafeSmartAccount({
+   101→   101→    client: pc,
+   102→   102→    owners: [signer],
+   103→   103→    threshold: 1n,
+   104→   104→    version: '1.4.1',
+   105→   105→  });
+   106→   106→
+   107→   107→  const smartAccountClient = createSmartAccountClient({
+   108→   108→    account: smartAccount,
+   109→   109→    chain: CHAIN_CONFIGS[chainKey].chain,
+   110→   110→    bundlerTransport: http(
+   111→   111→      `https://api.pimlico.io/v2/${chainKey}/rpc?apikey=${process.env.PIMLICO_API_KEY}`
+   112→   112→    ),
+   113→   113→    paymaster: pmc,
+   114→   114→    paymasterContext: {
+   115→   115→      policyId: process.env.PIMLICO_SPONSOR_POLICY_ID,
+   116→   116→    },
+   117→   117→  });
+   118→   118→
+   119→   119→  return {
+   120→   120→    smartAccount,
+   121→   121→    smartAccountClient,
+   122→   122→    signer,
+   123→   123→    smartAccountAddress: smartAccount.address,
+   124→   124→    chainKey,
+   125→   125→    chainConfig: CHAIN_CONFIGS[chainKey],
+   126→   126→  };
+   127→   127→}
+   128→   128→
+   129→   129→/**
+   130→   130→ * Backward-compat: getSmartAccountAddress() — returns Base Smart Account address.
+   131→   131→ * Use getSmartAccountAddressForChain(chainKey) for multi-chain.
+   132→   132→ */
+   133→   133→export async function getSmartAccountAddress(): Promise<string> {
+   134→   134→  const { smartAccountAddress } = await initSmartAccount('base');
+   135→   135→  return smartAccountAddress;
+   136→   136→}
+   137→   137→
+   138→   138→/**
+   139→   139→ * Returns Smart Account address for the specified chain.
+   140→   140→ */
+   141→   141→export async function getSmartAccountAddressForChain(chainKey: ChainKey): Promise<string> {
+   142→   142→  const { smartAccountAddress } = await initSmartAccount(chainKey);
+   143→   143→  return smartAccountAddress;
+   144→   144→}
+   145→   145→
+   146→   146→/**
+   147→   147→ * Scans for free-mint opportunities on Base.
+   148→   148→ *
+   149→   149→ * Strategy v2 (better coverage):
+   150→   150→ *   1. Fetch recent transfer events from OpenSea (last 1 hour, default 100 events)
+   151→   151→ *   2. Filter to mint events (from_address = null)
+   152→   152→ *   3. For each unique contract address, run findFreeMintFunction static-call
+   153→   153→ *   4. If a free-mint function is callable, add to candidates
+   154→   154→ *
+   155→   155→ * Fallback: if events API returns nothing useful, also check top collections list.
+   156→   156→ *
+   157→   157→ * Returns up to `maxCandidates` candidates.
+   158→   158→ */
+   159→   159→// Transfer event signature: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+   160→   160→const TRANSFER_EVENT_TOPIC =
+   161→   161→  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d';
+   162→   162→const ZERO_ADDRESS_TOPIC = '0x0000000000000000000000000000000000000000000000000000000000000000';
+   163→   163→
+   164→   164→// ERC-1155 TransferSingle event: TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)
+   165→   165→const ERC1155_TRANSFER_SINGLE_TOPIC =
+   166→   166→  '0xc3d58168c534f56d11ca6e9bd5de1a4d4e39e3e4c1d7b8e8c8e8e8e8e8e8e8e8e8e';
+   167→   167→
+   168→   168→// ERC-1155 TransferBatch event: TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)
+   169→   169→const ERC1155_TRANSFER_BATCH_TOPIC =
+   170→   170→  '0x4a39dc06d4c0dbc64ce8fcd2e6ae1b44886c1f1b4b1e6e3e3e3e3e3e3e3e3e3e3';
+   171→   171→
+   172→   172→/**
+   173→   173→ * Strategy 0: Direct on-chain mint event scan via getLogs.
+   174→   174→ *
+   175→   175→ * v3 — reduced block range from 500 to 200 (was timing out Vercel 60s limit
+   176→   176→ * on 5-min cron). Now scans both ERC-721 AND ERC-1155 in parallel via Promise.all.
+   177→   177→ *
+   178→   178→ * @param chainKey which chain to scan
+   179→   179→ * @param blockRange how many recent blocks to scan (default 200 = ~5 min on L2)
+   180→   180→ */
+   181→   181→async function scanRecentMintsViaLogs(
+   182→   182→  chainKey: ChainKey,
+   183→   183→  blockRange = 50
+   184→   184→): Promise<MintCandidate[]> {
+   185→   185→  try {
+   186→   186→    const { publicClient: pc } = getClientsForChain(chainKey);
+   187→   187→    const chainConfig = CHAIN_CONFIGS[chainKey];
+   188→   188→
+   189→   189→    const latestBlock = await pc.getBlockNumber();
+   190→   190→    const fromBlock = latestBlock - BigInt(blockRange);
+   191→   191→
+   192→   192→    let erc721Logs: any[] = [];
+   193→   193→    let erc1155SingleLogs: any[] = [];
+   194→   194→
+   195→   195→    try {
+   196→   196→      erc721Logs = await pc.getLogs({
+   197→   197→        fromBlock,
+   198→   198→        toBlock: latestBlock,
+   199→   199→        topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
+   200→   200→      } as any);
+   201→   201→    } catch {
+   202→   202→      logActivity({
+   203→   203→        type: 'error',
+   204→   204→        message: `getLogs ERC-721 failed on ${chainKey}`,
+   205→   205→        chain: chainKey,
+   206→   206→      });
+   207→   207→      return [];
+   208→   208→    }
+   209→   209→
+   210→   210→    try {
+   211→   211→      erc1155SingleLogs = await pc.getLogs({
+   212→   212→        fromBlock,
+   213→   213→        toBlock: latestBlock,
+   214→   214→        topics: [ERC1155_TRANSFER_SINGLE_TOPIC, null, ZERO_ADDRESS_TOPIC],
+   215→   215→      } as any);
+   216→   216→    } catch {
+   217→   217→      // ERC-1155 is bonus — continue with ERC-721 only
+   218→   218→    }
+   219→   219→
+   220→   220→    const allLogs: any[] = [...(erc721Logs || []), ...(erc1155SingleLogs || [])];
+   221→   221→
+   222→   222→    // Extract unique contracts
+   223→   223→    const seenContracts = new Set<string>();
+   224→   224→    for (const log of allLogs) {
+   225→   225→      if (log.address) seenContracts.add(log.address.toLowerCase());
+   226→   226→    }
+   227→   227→
+   228→   228→    logActivity({
+   229→   229→      type: 'chain_scan',
+   230→   230→      message: `${chainKey}: ${allLogs.length} mint events, ${seenContracts.size} unique contracts, checking...`,
+   231→   231→      chain: chainKey,
+   232→   232→    });
+   233→   233→
+   234→   234→    const candidates: MintCandidate[] = [];
+   235→   235→
+   236→   236→    for (const log of allLogs) {
+   237→   237→      if (!log.address) continue;
+   238→   238→      const contractAddress = log.address.toLowerCase();
+   239→   239→      if (seenContracts.has(contractAddress + '_checked')) continue;
+   240→   240→      seenContracts.add(contractAddress + '_checked');
+   241→   241→
+   242→   242→      const found = await findFreeMintFunction(contractAddress);
+   243→   243→      if (found) {
+   244→   244→        logActivity({
+   245→   245→          type: 'candidate_found',
+   246→   246→          message: `🚀 FREE MINT on ${chainKey}: ${contractAddress.slice(0, 12)}... — ${found.functionName}()`,
+   247→   247→          contract: contractAddress,
+   248→   248→          chain: chainKey,
+   249→   249→        });
+   250→   250→
+   251→   251→        candidates.push({
+   252→   252→          slug: `chain-${chainKey}`,
+   253→   253→          name: `On-chain mint ${contractAddress.slice(0, 8)}`,
+   254→   254→          contract: contractAddress,
+   255→   255→          functionName: found.functionName,
+   256→   256→          args: found.args,
+   257→   257→          detectedAt: new Date().toISOString(),
+   258→   258→          image_url: null,
+   259→   259→          opensea_url: `https://opensea.io/assets/${chainConfig.openSeaChain}/${contractAddress}`,
+   260→   260→          source: found.source,
+   261→   261→          abiInputs: found.abiInputs,
+   262→   262→          chain: chainKey,
+   263→   263→        });
+   264→   264→      }
+   265→   265→
+   266→   266→      if (candidates.length >= 5) break;
+   267→   267→    }
+   268→   268→
+   269→   269→    logActivity({
+   270→   270→      type: 'chain_scan',
+   271→   271→      message: `${chainKey}: checked ${seenContracts.size} contracts, found ${candidates.length} free-mints`,
+   272→   272→      chain: chainKey,
+   273→   273→    });
+   274→   274→
+   275→   275→    return candidates;
+   276→   276→  } catch {
+   277→   277→    return [];
+   278→   278→  }
+   279→   279→}
+   280→   280→
+   281→   281→export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidate[]> {
+   282→   282→  logScanStart();
+   283→   283→  const candidates: MintCandidate[] = [];
+   284→   284→  const tried = new Set<string>(); // dedup contract addresses within this scan
+   285→   285→  const allScannedAddresses: string[] = [];
+   286→   286→
+   287→   287→  // Map OpenSea chain names to our ChainKey (polygon uses 'matic' on OpenSea)
+   288→   288→  const openSeaToChainKey: Record<string, ChainKey> = {
+   289→   289→    base: 'base',
+   290→   290→    optimism: 'optimism',
+   291→   291→    arbitrum: 'arbitrum',
+   292→   292→    matic: 'polygon',
+   293→   293→    ethereum: 'ethereum',
+   294→   294→  };
+   295→   295→
+   296→   296→  // Strategy 1: OpenSea events API — PRIMARY strategy (works on ALL chains)
+   297→   297→  // mainnet.base.org and mainnet.optimism.io DON'T support address-less getLogs.
+   298→   298→  // OpenSea API catches mints on ALL chains and is reliable.
+   299→   299→  try {
+   300→   300→    const events = await getRecentBaseTransfers(100, 6 * 3600, 3);
+   301→   301→    const mintContracts = filterMintEventsForChains(events, [
+   302→   302→      'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
+   303→   303→    ]);
+   304→   304→
+   305→   305→    logActivity({
+   306→   306→      type: 'chain_scan',
+   307→   307→      message: `OpenSea: ${events.length} events, ${mintContracts.length} mint contracts found`,
+   308→   308→    });
+   309→   309→
+   310→   310→    for (const { contract: contractAddress, slug, chain } of mintContracts) {
+   311→   311→      if (candidates.length >= maxCandidates) break;
+   312→   312→      const dedupKey = `${chain}:${contractAddress}`;
+   313→   313→      if (tried.has(dedupKey)) continue;
+   314→   314→      tried.add(dedupKey);
+   315→   315→      allScannedAddresses.push(contractAddress);
+   316→   316→
+   317→   317→      const chainKey: ChainKey = openSeaToChainKey[chain] || 'base';
+   318→   318→
+   319→   319→      let actualSlug = slug;
+   320→   320→      let collectionName: string | undefined;
+   321→   321→      let collectionImageUrl: string | null = null;
+   322→   322→      if (!actualSlug) {
+   323→   323→        try {
+   324→   324→          const info = await getAssetContractInfo(contractAddress);
+   325→   325→          if (info) {
+   326→   326→            actualSlug = info.collection;
+   327→   327→            collectionName = info.name;
+   328→   328→            collectionImageUrl = info.image_url;
+   329→   329→            if (isSpammyName(info.name || '')) continue;
+   330→   330→          }
+   331→   331→        } catch {}
+   332→   332→      }
+   333→   333→
+   334→   334→      const found = await findFreeMintFunction(contractAddress);
+   335→   335→      if (found) {
+   336→   336→        logActivity({
+   337→   337→          type: 'candidate_found',
+   338→   338→          message: `🚀 OpenSea: FREE MINT at ${contractAddress.slice(0, 12)}... on ${chainKey} — ${found.functionName}()`,
+   339→   339→          contract: contractAddress,
+   340→   340→          chain: chainKey,
+   341→   341→        });
+   342→   342→        candidates.push({
+   343→   343→          slug: actualSlug || 'recent-mint',
+   344→   344→          name: collectionName || `OpenSea mint ${contractAddress.slice(0, 8)}`,
+   345→   345→          contract: contractAddress,
+   346→   346→          functionName: found.functionName,
+   347→   347→          args: found.args,
+   348→   348→          detectedAt: new Date().toISOString(),
+   349→   349→          image_url: collectionImageUrl,
+   350→   350→          opensea_url: `https://opensea.io/assets/${chain}/${contractAddress}`,
+   351→   351→          source: found.source,
+   352→   352→          abiInputs: found.abiInputs,
+   353→   353→          chain: chainKey,
+   354→   354→        });
+   355→   355→      }
+   356→   356→    }
+   357→   357→  } catch (err: any) {
+   358→   358→    logError(`OpenSea scan failed: ${err.message?.slice(0, 80)}`);
+   359→   359→  }
+   360→   360→
+   361→   361→  // Strategy 0: On-chain getLogs + deployment scan (SECONDARY — only on arbitrum where it works)
+   362→   362→  // mainnet.base.org returns 0 results for address-less getLogs (confirmed by testing).
+   363→   363→  // arb1.arbitrum.io DOES support getLogs.
+   364→   364→  const chainScanPromises = ALL_CHAINS.map(async (chainKey): Promise<MintCandidate[]> => {
+   365→   365→    try {
+   366→   366→      const chainCandidates = await scanRecentMintsViaLogs(chainKey);
+   367→   367→      logChainScan(chainKey, chainCandidates.length);
+   368→   368→
+   369→   369→      if (chainCandidates.length < 3) {
+   370→   370→        try {
+   371→   371→          const { scanRecentContractDeployments } = await import('@/lib/deployment-scanner');
+   372→   372→          const deployCandidates = await scanRecentContractDeployments(chainKey, 2);
+   373→   373→          return [...chainCandidates, ...deployCandidates];
+   374→   374→        } catch (e: any) {
+   375→   375→          logError(`Deploy scan ${chainKey} error: ${e.message?.slice(0, 60)}`);
+   376→   376→        }
+   377→   377→      }
+   378→   378→
+   379→   379→      return chainCandidates;
+   380→   380→    } catch (err: any) {
+   381→   381→      logError(`Chain ${chainKey} scan failed: ${err.message?.slice(0, 80)}`);
+   382→   382→      return [];
+   383→   383→    }
+   384→   384→  });
+   385→   385→
+   386→   386→  const chainResults = await Promise.all(chainScanPromises);
+   387→   387→
+   388→   388→  for (const chainCandidates of chainResults) {
+   389→   389→    for (const c of chainCandidates) {
+   390→   390→      if (candidates.length >= maxCandidates) break;
+   391→   391→      const dedupKey = `${c.chain}:${c.contract}`;
+   392→   392→      if (tried.has(dedupKey)) continue;
+   393→   393→      tried.add(dedupKey);
+   394→   394→      allScannedAddresses.push(c.contract);
+   395→   395→      candidates.push(c);
+   396→   396→      logCandidateFound(c.chain || 'unknown', c.contract, c.functionName);
+   397→   397→    }
+   398→   398→    if (candidates.length >= maxCandidates) break;
+   399→   399→  }
+   400→   400→
+   401→   401→  // Strategy 2: Social Signal Scanner (PROACTIVE — searches social media)
+   402→   402→  if (candidates.length < maxCandidates) {
+   403→   403→    try {
+   404→   404→      const { scanSocialMediaForMints } = await import('@/lib/social-scanner');
+   405→   405→      const socialCandidates = await scanSocialMediaForMints(maxCandidates - candidates.length);
+   406→   406→      for (const c of socialCandidates) {
+   407→   407→        if (candidates.length >= maxCandidates) break;
+   408→   408→        const dedupKey = `social:${c.contract}`;
+   409→   409→        if (tried.has(dedupKey)) continue;
+   410→   410→        tried.add(dedupKey);
+   411→   411→        allScannedAddresses.push(c.contract);
+   412→   412→        candidates.push(c);
+   413→   413→      }
+   414→   414→    } catch (err: any) {
+   415→   415→      logError(`Social scan failed: ${err.message?.slice(0, 80)}`);
+   416→   416→    }
+   417→   417→  }
+   418→   418→
+   419→   419→  // Strategy 3: Whale Copy-Minting (SMART — copies pro farmers)
+   420→   420→  if (candidates.length < maxCandidates) {
+   421→   421→    try {
+   422→   422→      const { scanWhaleMints } = await import('@/lib/whale-tracker');
+   423→   423→      for (const chainKey of ALL_CHAINS) {
+   424→   424→        if (candidates.length >= maxCandidates) break;
+   425→   425→        try {
+   426→   426→          const whaleCandidates = await scanWhaleMints(chainKey, 3);
+   427→   427→          for (const c of whaleCandidates) {
+   428→   428→            if (candidates.length >= maxCandidates) break;
+   429→   429→            const dedupKey = `whale:${c.contract}`;
+   430→   430→            if (tried.has(dedupKey)) continue;
+   431→   431→            tried.add(dedupKey);
+   432→   432→            allScannedAddresses.push(c.contract);
+   433→   433→            candidates.push(c);
+   434→   434→          }
+   435→   435→        } catch {}
+   436→   436→      }
+   437→   437→    } catch (err: any) {
+   438→   438→      logError(`Whale scan failed: ${err.message?.slice(0, 80)}`);
+   439→   439→    }
+   440→   440→  }
+   441→   441→
+   442→   442→  // Strategy 4 (fallback): Top collections from list
+   443→   443→  // v2 — now uses OpenSea floor=0 scanner for targeted free-mint detection
+   444→   444→  if (candidates.length === 0) {
+   445→   445→    try {
+   446→   446→      const { scanOpenSeaFloorZero } = await import('@/lib/opensea-scanner');
+   447→   447→      const floorCandidates = await scanOpenSeaFloorZero(maxCandidates, 5);
+   448→   448→      for (const c of floorCandidates) {
+   449→   449→        if (candidates.length >= maxCandidates) break;
+   450→   450→        const dedupKey = `floor0:${c.contract}`;
+   451→   451→        if (tried.has(dedupKey)) continue;
+   452→   452→        tried.add(dedupKey);
+   453→   453→        allScannedAddresses.push(c.contract);
+   454→   454→        candidates.push(c);
+   455→   455→      }
+   456→   456→    } catch (err: any) {
+   457→   457→      logError(`OpenSea floor=0 scan failed: ${err.message?.slice(0, 80)}`);
+   458→   458→    }
+   459→   459→  }
+   460→   460→
+   461→   461→  // Record stats
+   462→   462→  recordScan(candidates.length, allScannedAddresses);
+   463→   463→
+   464→   464→  return candidates;
+   465→   465→}
+   466→   466→
+   467→   467→/**
+   468→   468→ * Executes a free mint via Pimlico Smart Account + Paymaster (gasless).
+   469→   469→ *
+   470→   470→ * Steps:
+   471→   471→ *   1. Init Smart Account (gets the deterministic address)
+   472→   472→ *   2. Send UserOp calling the mint function
+   473→   473→ *   3. Wait for receipt
+   474→   474→ *   4. Return tx hash
+   475→   475→ *
+   476→   476→ * The Paymaster sponsors gas — no ETH needed on Smart Account.
+   477→   477→ */
+   478→   478→/**
+   479→   479→ * Fire-and-forget: fetches tx receipt, extracts ERC-721 token_id from Transfer event,
+   480→   480→ * then sends a Telegram message with direct OpenSea sell URL.
+   481→   481→ *
+   482→   482→ * Called after successful mint. Doesn't block the main flow.
+   483→   483→ *
+   484→   484→ * Transfer event signature: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+   485→   485→ * Topic0: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628bca44fb737c88d
+   486→   486→ * For mint: topics[1] (from) = 0x0000...0000
+   487→   487→ * TokenId: topics[3] (big-endian uint256 as hex)
+   488→   488→ *
+   489→   489→ * Constants TRANSFER_EVENT_TOPIC and ZERO_ADDRESS_TOPIC are defined at top of file
+   490→   490→ * (used by scanRecentMintsViaLogs).
+   491→   491→ */
+   492→   492→
+   493→   493→async function sendListingLinkAfterReceipt(
+   494→   494→  txHash: string,
+   495→   495→  chainKey: ChainKey,
+   496→   496→  candidate: MintCandidate
+   497→   497→): Promise<void> {
+   498→   498→  try {
+   499→   499→    const { publicClient: pc } = getClientsForChain(chainKey);
+   500→   500→
+   501→   501→    // Wait for tx receipt (usually 5-15s on L2, 15-30s on L1)
+   502→   502→    const receipt = await pc.waitForTransactionReceipt({
+   503→   503→      hash: txHash as `0x${string}`,
+   504→   504→      timeout: 60_000,
+   505→   505→      confirmations: 1,
+   506→   506→    });
+   507→   507→
+   508→   508→    // Find Transfer event where from = 0x0 (mint) and the contract is ours
+   509→   509→    const contractLower = candidate.contract.toLowerCase();
+   510→   510→    const mintLogs = (receipt.logs || []).filter(
+   511→   511→      (log: any) =>
+   512→   512→        log.address?.toLowerCase() === contractLower &&
+   513→   513→        log.topics?.[0] === TRANSFER_EVENT_TOPIC &&
+   514→   514→        log.topics?.[1] === ZERO_ADDRESS_TOPIC
+   515→   515→    );
+   516→   516→
+   517→   517→    if (mintLogs.length === 0) {
+   518→   518→      // Could be ERC-1155 (different event signature) — bail gracefully
+   519→   519→      return;
+   520→   520→    }
+   521→   521→
+   522→   522→    // Take the first mint log's token_id
+   523→   523→    const tokenIdHex = mintLogs[0].topics?.[3];
+   524→   524→    if (!tokenIdHex) return;
+   525→   525→    const tokenId = BigInt(tokenIdHex).toString();
+   526→   526→
+   527→   527→    // Try to fetch floor price from OpenSea (best-effort, don't fail if API errors)
+   528→   528→    let estimatedFloor: number | null = null;
+   529→   529→    let listingPriceEth: string | null = null;
+   530→   530→    if (candidate.slug && candidate.slug !== 'recent-mint' && candidate.slug !== 'manual' && candidate.slug !== `chain-${chainKey}`) {
+   531→   531→      try {
+   532→   532→        const detail = await getCollectionDetail(candidate.slug);
+   533→   533→        estimatedFloor = detail?.floor_price ?? null;
+   534→   534→        // If we have floor, list at 5% below for fast sale; otherwise default to 0.005 ETH
+   535→   535→        if (estimatedFloor && estimatedFloor > 0) {
+   536→   536→          listingPriceEth = (estimatedFloor * 0.95).toFixed(6);
+   537→   537→        }
+   538→   538→      } catch {
+   539→   539→        // ignore
+   540→   540→      }
+   541→   541→    }
+   542→   542→
+   543→   543→    // Default listing price if no floor: 0.005 ETH (~$15) — small price for fast sales
+   544→   544→    if (!listingPriceEth) {
+   545→   545→      listingPriceEth = process.env.LISTING_PRICE_ETH || '0.005';
+   546→   546→    }
+   547→   547→
+   548→   548→    // Send Telegram message with direct sell URL (manual fallback)
+   549→   549→    await notifyListingLink({
+   550→   550→      contract: candidate.contract,
+   551→   551→      tokenId,
+   552→   552→      chain: chainKey,
+   553→   553→      collectionName: candidate.name,
+   554→   554→      estimatedFloor,
+   555→   555→    });
+   556→   556→
+   557→   557→    // AUTO-LISTING: try to list NFT on OpenSea via Seaport + Smart Account signing
+   558→   558→    // This is the "Option 3" full automation — bot creates the listing itself.
+   559→   559→    try {
+   560→   560→      const { createOpenSeaListing } = await import('@/lib/seaport');
+   561→   561→      const listingResult = await createOpenSeaListing({
+   562→   562→        nftContract: candidate.contract,
+   563→   563→        tokenId,
+   564→   564→        priceEth: listingPriceEth,
+   565→   565→        chainKey,
+   566→   566→        isErc1155: false,
+   567→   567→        collectionName: candidate.name,
+   568→   568→      });
+   569→   569→
+   570→   570→      if (listingResult.success) {
+   571→   571→        logActivity({
+   572→   572→          type: 'telegram_sent',
+   573→   573→          message: `NFT auto-listed on OpenSea at ${listingPriceEth} ETH`,
+   574→   574→          chain: chainKey,
+   575→   575→          contract: candidate.contract,
+   576→   576→        });
+   577→   577→      } else {
+   578→   578→        logActivity({
+   579→   579→          type: 'error',
+   580→   580→          message: `Auto-list failed: ${listingResult.error?.slice(0, 80)}`,
+   581→   581→          chain: chainKey,
+   582→   582→          contract: candidate.contract,
+   583→   583→        });
+   584→   584→      }
+   585→   585→    } catch (e: any) {
+   586→   586→      logActivity({
+   587→   587→        type: 'error',
+   588→   588→        message: `Auto-list exception: ${e.message?.slice(0, 80)}`,
+   589→   589→        chain: chainKey,
+   590→   590→      });
+   591→   591→    }
+   592→   592→
+   593→   593→    // AUTO-CLAIM: check if the NFT contract has claimable ERC-20 tokens
+   594→   594→    // Many NFT collections distribute tokens to holders via claim()/harvest()/getReward()
+   595→   595→    try {
+   596→   596→      const claimResult = await findClaimFunction(
+   597→   597→        candidate.contract,
+   598→   598→        tokenId,
+   599→   599→        smartAccountAddress
+   600→   600→      );
+   601→   601→
+   602→   602→      if (claimResult) {
+   603→   603→        // Build ABI for the claim function
+   604→   604→        let claimAbi: any;
+   605→   605→        if (Array.isArray(claimResult.abiInputs)) {
+   606→   606→          claimAbi = [{
+   607→   607→            type: 'function',
+   608→   608→            name: claimResult.functionName,
+   609→   609→            inputs: claimResult.abiInputs,
+   610→   610→            outputs: [],
+   611→   611→            stateMutability: 'nonpayable',
+   612→   612→          }];
+   613→   613→        } else {
+   614→   614→          claimAbi = FREE_MINT_ABI;
+   615→   615→        }
+   616→   616→
+   617→   617→        const { smartAccountClient: claimClient } = await initSmartAccount(chainKey);
+   618→   618→
+   619→   619→        const claimTxHash = await claimClient.writeContract({
+   620→   620→          address: candidate.contract as `0x${string}`,
+   621→   621→          abi: claimAbi,
+   622→   622→          functionName: claimResult.functionName,
+   623→   623→          args: claimResult.args as any[],
+   624→   624→        });
+   625→   625→
+   626→   626→        logActivity({
+   627→   627→          type: 'mint_success',
+   628→   628→          message: `Claimed tokens via ${claimResult.functionName}() — tx: ${claimTxHash?.slice(0, 16)}...`,
+   629→   629→          chain: chainKey,
+   630→   630→          contract: candidate.contract,
+   631→   631→          txHash: claimTxHash,
+   632→   632→        });
+   633→   633→
+   634→   634→        // Send Telegram notification
+   635→   635→        await sendTelegramMessage(`💰 *Tokens Claimed!*
+   636→   636→
+   637→   637→📦 *Collection:* ${candidate.name}
+   638→   638→🔗 *Function:* \`${claimResult.functionName}()\`
+   639→   639→⛓ *Chain:* ${chainKey}
+   640→   640→🎫 *Tx:* [${claimTxHash.slice(0, 16)}...](${`https://${chainKey}scan.org/tx/${claimTxHash}`})
+   641→   641→
+   642→   642→Tokens sent to Smart Account. Swap to ETH on a DEX (Aerodrome/Uniswap) to realize profit.`);
+   643→   643→      }
+   644→   644→    } catch (e: any) {
+   645→   645→      // Auto-claim is best-effort — don't fail if it errors
+   646→   646→      logActivity({
+   647→   647→        type: 'error',
+   648→   648→        message: `Auto-claim failed: ${e.message?.slice(0, 80)}`,
+   649→   649→        chain: chainKey,
+   650→   650→      });
+   651→   651→    }
+   652→   652→  } catch (e) {
+   653→   653→    // Don't throw — this is fire-and-forget
+   654→   654→    console.error('[sniper] sendListingLinkAfterReceipt error:', e);
+   655→   655→  }
+   656→   656→}
+   657→   657→
+   658→   658→export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
+   659→   659→  recordMintAttempt();
+   660→   660→  try {
+   661→   661→    const chainKey = candidate.chain || 'base';
+   662→   662→    const { smartAccountClient, smartAccountAddress, chainConfig } = await initSmartAccount(chainKey);
+   663→   663→
+   664→   664→    // Build the right ABI for the call:
+   665→   665→    // - If we have Basescan-detected inputs, build a minimal ABI for just that function
+   666→   666→    // - Otherwise use the hardcoded FREE_MINT_ABI (which has all standard signatures)
+   667→   667→    let abi: any;
+   668→   668→    if (Array.isArray(candidate.abiInputs)) {
+   669→   669→      abi = [
+   670→   670→        {
+   671→   671→          type: 'function',
+   672→   672→          name: candidate.functionName,
+   673→   673→          inputs: candidate.abiInputs,
+   674→   674→          outputs: [],
+   675→   675→          stateMutability: 'nonpayable',
+   676→   676→        },
+   677→   677→      ];
+   678→   678→    } else {
+   679→   679→      abi = FREE_MINT_ABI;
+   680→   680→    }
+   681→   681→
+   682→   682→    const txHash = await smartAccountClient.writeContract({
+   683→   683→      address: candidate.contract as `0x${string}`,
+   684→   684→      abi,
+   685→   685→      functionName: candidate.functionName,
+   686→   686→      args: candidate.args as any[],
+   687→   687→    });
+   688→   688→
+   689→   689→    const result: MintResult = {
+   690→   690→      candidate,
+   691→   691→      success: true,
+   692→   692→      txHash,
+   693→   693→      smartAccountAddress,
+   694→   694→    };
+   695→   695→
+   696→   696→    RECENT_MINTS.unshift(result);
+   697→   697→    if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
+   698→   698→    ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
+   699→   699→    recordMintSuccess();
+   700→   700→
+   701→   701→    // Notify Telegram (fire-and-forget — don't block on failure)
+   702→   702→    void notifyMintSuccess({
+   703→   703→      contract: candidate.contract,
+   704→   704→      functionName: candidate.functionName,
+   705→   705→      txHash,
+   706→   706→      smartAccountAddress,
+   707→   707→      collectionName: candidate.name,
+   708→   708→      openseaUrl: candidate.opensea_url,
+   709→   709→      chain: chainKey,
+   710→   710→    }).catch(() => {});
+   711→   711→
+   712→   712→    // Fire-and-forget: fetch receipt, extract token_id, send direct OpenSea sell link
+   713→   713→    void sendListingLinkAfterReceipt(txHash, chainKey, candidate).catch(() => {});
+   714→   714→
+   715→   715→    return result;
+   716→   716→  } catch (err: any) {
+   717→   717→    const chainKey = candidate.chain || 'base';
+   718→   718→    const result: MintResult = {
+   719→   719→      candidate,
+   720→   720→      success: false,
+   721→   721→      error: err?.message || String(err),
+   722→   722→    };
+   723→   723→    RECENT_MINTS.unshift(result);
+   724→   724→    if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
+   725→   725→    ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
+   726→   726→    recordMintFailure();
+   727→   727→
+   728→   728→    // Notify Telegram (fire-and-forget)
+   729→   729→    void notifyMintFailure({
+   730→   730→      contract: candidate.contract,
+   731→   731→      functionName: candidate.functionName,
+   732→   732→      error: err?.message || String(err),
+   733→   733→      collectionName: candidate.name,
+   734→   734→      chain: chainKey,
+   735→   735→    }).catch(() => {});
+   736→   736→
+   737→   737→    return result;
+   738→   738→  }
+   739→   739→}
+   740→   740→
+   741→   741→/**
+   742→   742→ * One cron cycle: scan + attempt mints for top candidates.
+   743→   743→ * v2 — runs scan TWICE per cycle (double coverage within same Vercel invocation).
+   744→   744→ * This catches mints that appeared between the two scans (~10s gap).
+   745→   745→ *
+   746→   746→ * @param maxMintsPerCycle hard cap on mints per cycle (default 2)
+   747→   747→ */
+   748→   748→export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
+   749→   749→  scanned: number;
+   750→   750→  candidates: MintCandidate[];
+   751→   751→  results: MintResult[];
+   752→   752→}> {
+   753→   753→  try {
+   754→   754→    const candidates1 = await scanForFreeMints(maxMintsPerCycle * 3);
+   755→   755→    const results: MintResult[] = [];
+   756→   756→
+   757→   757→    for (const candidate of (candidates1 || []).slice(0, maxMintsPerCycle)) {
+   758→   758→      try {
+   759→   759→        const result = await executeMint(candidate);
+   760→   760→        results.push(result);
+   761→   761→      } catch (e: any) {
+   762→   762→        results.push({
+   763→   763→          candidate,
+   764→   764→          success: false,
+   765→   765→          error: e?.message || 'Mint execution error',
+   766→   766→        });
+   767→   767→      }
+   768→   768→    }
+   769→   769→
+   770→   770→    recordScan((candidates1 || []).length, []);
+   771→   771→
+   772→   772→    return {
+   773→   773→      scanned: (candidates1 || []).length,
+   774→   774→      candidates: candidates1 || [],
+   775→   775→      results,
+   776→   776→    };
+   777→   777→  } catch (e: any) {
+   778→   778→    return {
+   779→   779→      scanned: 0,
+   780→   780→      candidates: [],
+   781→   781→      results: [],
+   782→   782→    };
+   783→   783→  }
+   784→   784→}
+   785→   785→
+   786→   786→/**
+   787→   787→ * Returns the in-memory log of recent mint attempts.
+   788→   788→ */
+   789→   789→export function getRecentMints(): MintResult[] {
+   790→   790→  return [...RECENT_MINTS];
+   791→   791→}
+   792→   792→
+   793→   793→// Note: getSmartAccountAddress() is defined earlier in this file (around line 132)
+   794→   794→// — see that definition for the implementation.
+   795→   795→
