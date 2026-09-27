@@ -46,23 +46,26 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    // Official Base RPC — works for eth_blockNumber (getLogs may fail, that's OK)
-    rpcUrl: 'https://mainnet.base.org',
+    // v2: switched from mainnet.base.org to Pimlico RPC — official Base RPC was
+    // timing out from Vercel during eth_getBalance calls (caused "RPC Request
+    // failed" errors on 2/10 mint attempts). Pimlico serves all standard RPC
+    // methods (eth_getBalance, eth_chainId, etc.) reliably on free tier.
+    rpcUrl: `https://api.pimlico.io/v2/base/rpc?apikey=${process.env.PIMLICO_API_KEY}`,
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: 'https://mainnet.optimism.io',
+    rpcUrl: `https://api.pimlico.io/v2/optimism/rpc?apikey=${process.env.PIMLICO_API_KEY}`,
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
-    // Arb1 official RPC — supports BOTH getBlockNumber AND getLogs ✅
-    rpcUrl: 'https://arb1.arbitrum.io/rpc',
+    // v2: switched to Pimlico RPC for consistency + reliability
+    rpcUrl: `https://api.pimlico.io/v2/arbitrum/rpc?apikey=${process.env.PIMLICO_API_KEY}`,
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
   },
