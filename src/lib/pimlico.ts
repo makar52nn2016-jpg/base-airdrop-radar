@@ -46,26 +46,26 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    // v2: switched from mainnet.base.org to Pimlico RPC — official Base RPC was
-    // timing out from Vercel during eth_getBalance calls (caused "RPC Request
-    // failed" errors on 2/10 mint attempts). Pimlico serves all standard RPC
-    // methods (eth_getBalance, eth_chainId, etc.) reliably on free tier.
-    rpcUrl: `https://api.pimlico.io/v2/base/rpc?apikey=${process.env.PIMLICO_API_KEY}`,
+    // v3: switched to PublicNode RPC — official mainnet.base.org was timing out
+    // from Vercel on eth_getBalance calls (2/10 attempts failed with "RPC
+    // Request failed"). Pimlico RPC doesn't support eth_call. PublicNode is
+    // a free, reliable, multi-chain RPC provider that supports all standard
+    // methods including eth_call, eth_getBalance, eth_getLogs.
+    rpcUrl: 'https://base-rpc.publicnode.com',
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: `https://api.pimlico.io/v2/optimism/rpc?apikey=${process.env.PIMLICO_API_KEY}`,
+    rpcUrl: 'https://optimism-rpc.publicnode.com',
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
-    // v2: switched to Pimlico RPC for consistency + reliability
-    rpcUrl: `https://api.pimlico.io/v2/arbitrum/rpc?apikey=${process.env.PIMLICO_API_KEY}`,
+    rpcUrl: 'https://arbitrum-one-rpc.publicnode.com',
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
   },
