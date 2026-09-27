@@ -35,7 +35,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await runSniperCycle(2);
+    // Reduced from 2 to 1 — with cron-job.org pinging every 1 minute,
+    // 1 mint per cycle is enough (and avoids rate-limits on Vercel 60s timeout).
+    // Total: ~60 mints/hour max if every scan finds candidates.
+    const result = await runSniperCycle(1);
     return NextResponse.json({
       success: true,
       timestamp: new Date().toISOString(),

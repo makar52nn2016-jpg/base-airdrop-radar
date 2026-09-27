@@ -88,8 +88,115 @@ export interface MintResult {
 const RECENT_MINTS: MintResult[] = [];
 const MAX_LOG_SIZE = 100;
 
-// Already-attempted contracts (avoid retrying within same warm session).
-const ATTEMPTED = new Set<string>();
+// Already-attempted contracts — Map<contractKey, timestamp>.
+// v2 — now persisted to Supabase on every write so it survives Vercel cold starts.
+// Without this, every scan after instance recycling would re-notify the SAME
+// 6 OpenSea contracts in TG — exactly the spam user was complaining about.
+// TTL: 1 hour (entries older than that get pruned, allow retry).
+const ATTEMPTED = new Map<string, number>(); // key = `${chain}:${contract}`, value = unix ms
+const ATTEMPTED_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// TG notification cooldown — separate from ATTEMPTED (which blocks mint retry).
+// Even if we re-attempt a mint after 1h TTL, we don't spam TG about the same
+// contract more than once per hour. Track per-contract last-notified timestamp.
+const NOTIFIED = new Map<string, number>();
+const NOTIFIED_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// Has ATTEMPTED been loaded from Supabase yet this instance?
+let ATTEMPTED_LOADED = false;
+
+/**
+ * Loads ATTEMPTED map from Supabase (once per Vercel instance).
+ * Prunes entries older than ATTEMPTED_TTL_MS.
+ * Best-effort — fails silently if Supabase not configured.
+ */
+async function ensureAttemptedLoaded(): Promise<void> {
+  if (ATTEMPTED_LOADED) return;
+  ATTEMPTED_LOADED = true;
+  try {
+    const { loadState } = await import('@/lib/supabase');
+    const persisted = await loadState<{ [k: string]: number }>('attempted_contracts');
+    if (persisted && typeof persisted === 'object') {
+      const now = Date.now();
+      for (const [k, ts] of Object.entries(persisted)) {
+        if (typeof ts === 'number' && now - ts < ATTEMPTED_TTL_MS) {
+          ATTEMPTED.set(k, ts);
+        }
+      }
+      logActivity({
+        type: 'chain_scan',
+        message: `Loaded ${ATTEMPTED.size} attempted contracts from Supabase`,
+      });
+    }
+  } catch {
+    // Silent fail — bot still works with empty ATTEMPTED
+  }
+}
+
+/**
+ * Saves ATTEMPTED map to Supabase (fire-and-forget).
+ * Called after each mint attempt (success or fail).
+ */
+async function saveAttempted(): Promise<void> {
+  try {
+    const { saveState } = await import('@/lib/supabase');
+    const obj: { [k: string]: number } = {};
+    for (const [k, ts] of ATTEMPTED.entries()) {
+      obj[k] = ts;
+    }
+    await saveState('attempted_contracts', obj);
+  } catch {
+    // Silent fail
+  }
+}
+
+/**
+ * Has this contract been attempted recently (within ATTEMPTED_TTL_MS)?
+ * Also checks NOTIFIED map — even if not attempted, we don't want to spam TG.
+ */
+function isRecentlyAttempted(chainKey: string, contract: string): boolean {
+  const key = `${chainKey}:${contract.toLowerCase()}`;
+  const ts = ATTEMPTED.get(key);
+  if (!ts) return false;
+  return Date.now() - ts < ATTEMPTED_TTL_MS;
+}
+
+/**
+ * Has this contract been TG-notified recently (within NOTIFIED_TTL_MS)?
+ * Used to suppress duplicate TG messages about the same contract.
+ */
+function isRecentlyNotified(chainKey: string, contract: string): boolean {
+  const key = `${chainKey}:${contract.toLowerCase()}`;
+  const ts = NOTIFIED.get(key);
+  if (!ts) return false;
+  return Date.now() - ts < NOTIFIED_TTL_MS;
+}
+
+function markAttempted(chainKey: string, contract: string): void {
+  const key = `${chainKey}:${contract.toLowerCase()}`;
+  ATTEMPTED.set(key, Date.now());
+  void saveAttempted();
+}
+
+function markNotified(chainKey: string, contract: string): void {
+  const key = `${chainKey}:${contract.toLowerCase()}`;
+  NOTIFIED.set(key, Date.now());
+}
+
+// Prune ATTEMPTED entries older than TTL (called periodically).
+function pruneAttempted(): void {
+  const now = Date.now();
+  let pruned = 0;
+  for (const [k, ts] of ATTEMPTED.entries()) {
+    if (now - ts > ATTEMPTED_TTL_MS) {
+      ATTEMPTED.delete(k);
+      pruned++;
+    }
+  }
+  if (pruned > 0) {
+    void saveAttempted();
+  }
+}
 
 // Persistent scan counter — survives warm Vercel instances.
 // Used to fire heartbeat every Nth scan so user knows cron is alive.
@@ -361,6 +468,13 @@ async function scanRecentMintsViaLogs(
 
 export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidate[]> {
   logScanStart();
+
+  // CRITICAL: load attempted contracts from Supabase before scanning.
+  // Without this, Vercel cold start = empty ATTEMPTED map = same 6 OpenSea contracts
+  // re-notified in TG every minute (was exactly user's complaint).
+  await ensureAttemptedLoaded();
+  pruneAttempted();
+
   const candidates: MintCandidate[] = [];
   const tried = new Set<string>(); // dedup contract addresses within this scan
   const allScannedAddresses: string[] = [];
@@ -377,15 +491,19 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   // Strategy 1: OpenSea events API — PRIMARY strategy (works on ALL chains)
   // mainnet.base.org and mainnet.optimism.io DON'T support address-less getLogs.
   // OpenSea API catches mints on ALL chains and is reliable.
+  //
+  // v2 — REDUCED window from 6h to 30min. Old window kept returning the same
+  // 6 contracts every scan (since OpenSea mints within last 6h don't change
+  // often on Base). 30min window = only fresh mints, less duplication.
   try {
-    const events = await getRecentBaseTransfers(100, 6 * 3600, 3);
+    const events = await getRecentBaseTransfers(100, 30 * 60, 2);
     const mintContracts = filterMintEventsForChains(events, [
       'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
     ]);
 
     logActivity({
       type: 'chain_scan',
-      message: `OpenSea: ${events.length} events, ${mintContracts.length} mint contracts found`,
+      message: `OpenSea: ${events.length} events (30min window), ${mintContracts.length} mint contracts found`,
     });
 
     for (const { contract: contractAddress, slug, chain } of mintContracts) {
@@ -393,9 +511,15 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
       const dedupKey = `${chain}:${contractAddress}`;
       if (tried.has(dedupKey)) continue;
       tried.add(dedupKey);
-      allScannedAddresses.push(contractAddress);
 
+      // SKIP contracts already attempted in last hour — don't add as candidate.
+      // This is the main dedup mechanism that prevents TG spam on cold starts.
       const chainKey: ChainKey = openSeaToChainKey[chain] || 'base';
+      if (isRecentlyAttempted(chainKey, contractAddress)) {
+        continue;
+      }
+
+      allScannedAddresses.push(contractAddress);
 
       let actualSlug = slug;
       let collectionName: string | undefined;
@@ -774,16 +898,29 @@ function isBoringRevertError(errorMsg: string): boolean {
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
   recordMintAttempt(candidate.contract, candidate.chain || 'base');
 
-  // Pre-mint Telegram notification — let user see the bot is alive + working
-  // For blind-mint candidates, ALWAYS notify (user wants to see attempts)
-  void notifyCandidateFound({
-    contract: candidate.contract,
-    functionName: candidate.functionName,
-    chain: candidate.chain || 'base',
-    collectionName: candidate.name,
-    source: candidate.source,
-    openseaUrl: candidate.opensea_url,
-  }).catch(() => {});
+  // Pre-mint Telegram notification — fire only if this contract hasn't been
+  // notified in the last hour. Without this, every cold-start cycle would
+  // spam the same 6 contracts in TG (exactly the user's complaint).
+  const chainKeyForNotify = candidate.chain || 'base';
+  if (!isRecentlyNotified(chainKeyForNotify, candidate.contract)) {
+    markNotified(chainKeyForNotify, candidate.contract);
+    void notifyCandidateFound({
+      contract: candidate.contract,
+      functionName: candidate.functionName,
+      chain: chainKeyForNotify,
+      collectionName: candidate.name,
+      source: candidate.source,
+      openseaUrl: candidate.opensea_url,
+    }).catch(() => {});
+  } else {
+    // Silently skip — already notified about this contract recently
+    logActivity({
+      type: 'telegram_sent',
+      message: `Skipping TG for ${candidate.name?.slice(0, 30)} — recently notified`,
+      chain: chainKeyForNotify,
+      contract: candidate.contract,
+    });
+  }
 
   try {
     const chainKey = candidate.chain || 'base';
@@ -859,7 +996,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
 
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
-    ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
+    markAttempted(chainKey, candidate.contract);
     recordMintSuccess(txHash, candidate.contract, chainKey);
     LAST_MINT_TIMESTAMP = Date.now();
 
@@ -888,7 +1025,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     };
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
-    ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
+    markAttempted(chainKey, candidate.contract);
     recordMintFailure(errorMsg, candidate.contract, chainKey);
 
     // SPAM FILTER: skip TG notification for "boring" reverts (paid mints, wrong args)
