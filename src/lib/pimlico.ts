@@ -72,26 +72,26 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   polygon: {
     key: 'polygon',
     chain: polygon,
-    // Official Polygon RPC — works for getBlockNumber
-    rpcUrl: 'https://polygon-rpc.com',
+    // PublicNode RPC — reliable, supports eth_call + eth_getBalance + eth_getLogs
+    rpcUrl: 'https://polygon-bor-rpc.publicnode.com',
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    // Cloudflare ETH gateway — free, no API key
-    rpcUrl: 'https://cloudflare-eth.com',
+    // PublicNode RPC — reliable for state queries
+    rpcUrl: 'https://ethereum-rpc.publicnode.com',
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },
 };
 
-// Only scan chains with working RPCs from Vercel.
-// polygon and ethereum RPCs fail from Vercel (401/connection issues).
-// They're still in CHAIN_CONFIGS (for /chains command) but not scanned.
-// OpenSea events API (Strategy 1) still catches mints on ALL chains.
-export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum'];
+// All 5 chains now active (was 3). Polygon + Ethereum added for wider coverage.
+// Polygon uses ETH for gas (since Polygon migrated to ETH).
+// Ethereum mainnet gas is expensive — bot will skip Ethereum mints unless
+// Smart Account has > 0.00005 ETH on Ethereum.
+export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'];
 
 // Cache clients per chain (creating clients is expensive)
 const clientCache = new Map<ChainKey, { publicClient: any; bundlerClient: any; paymasterClient: any }>();

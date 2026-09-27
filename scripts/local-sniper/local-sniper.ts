@@ -50,7 +50,7 @@ const MAX_MINTS_PER_CYCLE = 50;            // 50 ментов за цикл (б�
 const MAX_CANDIDATES_PER_SCAN = 200;       // 200 кандидатов за скан (было 50)
 const DASHBOARD_REFRESH_MS = 500;          // refresh каждые 500ms
 const PARALLEL_MINT_BATCH_SIZE = 5;        // 5 параллельных mint attempts (было sequential)
-const SCAN_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum'];
+const SCAN_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'];
 
 // ============================================================================
 // ANSI COLORS — для красивого терминального вывода
