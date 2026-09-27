@@ -179,7 +179,7 @@ const ERC1155_TRANSFER_BATCH_TOPIC =
  */
 async function scanRecentMintsViaLogs(
   chainKey: ChainKey,
-  blockRange = 200
+  blockRange = 50
 ): Promise<MintCandidate[]> {
   try {
     const { publicClient: pc } = getClientsForChain(chainKey);
