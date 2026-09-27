@@ -52,3 +52,7 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Sniper bot secrets — never commit
+scripts/cron_secret.txt
+scripts/cron_job_url.txt
+.env.local

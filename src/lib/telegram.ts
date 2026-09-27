@@ -297,3 +297,63 @@ Total mints today: *${stats.totalMints}*
 
   await sendTelegramMessage(msg);
 }
+
+/**
+ * Pre-mint notification — fires BEFORE the mint attempt, so the user
+ * can see the bot is alive and what candidate was detected.
+ *
+ * @param opts candidate info
+ */
+export async function notifyCandidateFound(opts: {
+  contract: string;
+  functionName: string;
+  chain?: string;
+  collectionName?: string;
+  source?: string;
+  openseaUrl?: string;
+}): Promise<void> {
+  const chain = opts.chain || 'base';
+  const name = opts.collectionName || `Contract ${opts.contract.slice(0, 10)}`;
+  const osUrl = opts.openseaUrl || `https://opensea.io/assets/${chain}/${opts.contract}`;
+  const srcTag = opts.source === 'blind' ? ' 🎲blind' : opts.source === 'basescan' ? ' 📜abi' : ' ⚡fb';
+
+  const msg = `🎯 *Candidate detected*${srcTag}
+
+📦 *Collection:* ${name}
+🔗 *Function:* \`${opts.functionName}\`
+⛓ *Chain:* ${chain}
+📜 *Contract:* [${opts.contract.slice(0, 10)}...](${`https://${chain}scan.org/address/${opts.contract}`})
+
+⏳ Attempting mint now...`;
+
+  await sendTelegramMessage(msg);
+}
+
+/**
+ * Heartbeat — periodic "I'm alive" message so the user knows cron is running.
+ * Fired every Nth scan (e.g. every 10 scans ≈ every 10 minutes if cron = 1 min).
+ *
+ * @param scanNumber current scan counter
+ * @param lastMintAgoSec seconds since last successful mint
+ */
+export async function notifyHeartbeat(opts: {
+  scanNumber: number;
+  totalScans: number;
+  lastMintAgoSec: number | null;
+  nextScanInSec: number;
+}): Promise<void> {
+  const lastMintLine =
+    opts.lastMintAgoSec !== null
+      ? `Last mint: ${Math.floor(opts.lastMintAgoSec / 60)} min ago`
+      : 'No mints yet';
+
+  const msg = `💚 *Heartbeat #${opts.scanNumber}*
+
+🔍 Total scans: *${opts.totalScans}*
+${lastMintLine}
+⏭ Next scan in: *${Math.floor(opts.nextScanInSec / 60)} min*
+
+🤖 Sniper is alive — running every minute via cron-job.org`;
+
+  await sendTelegramMessage(msg);
+}

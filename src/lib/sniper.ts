@@ -34,7 +34,15 @@ import {
   logError,
   logActivity,
 } from '@/lib/stats';
-import { notifyMintSuccess, notifyMintFailure, notifyListingLink } from '@/lib/telegram';
+import {
+  notifyMintSuccess,
+  notifyMintFailure,
+  notifyListingLink,
+  notifyCandidateFound,
+  notifyScanSummary,
+  notifyHeartbeat,
+  sendTelegramMessage,
+} from '@/lib/telegram';
 import { checkContractQuality, isSpammyName } from '@/lib/quality';
 
 /**
@@ -82,6 +90,12 @@ const MAX_LOG_SIZE = 100;
 
 // Already-attempted contracts (avoid retrying within same warm session).
 const ATTEMPTED = new Set<string>();
+
+// Persistent scan counter — survives warm Vercel instances.
+// Used to fire heartbeat every Nth scan so user knows cron is alive.
+let SCAN_COUNTER = 0;
+let LAST_MINT_TIMESTAMP: number | null = null;
+const HEARTBEAT_INTERVAL = 10; // every 10 scans (≈10 min if cron = 1 min)
 
 /**
  * Initializes the Pimlico Smart Account from the configured signer key.
@@ -655,8 +669,55 @@ Tokens sent to Smart Account. Swap to ETH on a DEX (Aerodrome/Uniswap) to realiz
   }
 }
 
+/**
+ * Detects whether an error represents a contract revert (paid mint, wrong args, etc).
+ * These errors are EXPECTED when blind-minting paid contracts — we don't want to
+ * spam Telegram with 50+ identical "execution reverted" messages per hour.
+ *
+ * Returns true if this is a "boring" revert error (skip TG), false if it's
+ * an unexpected error worth notifying about.
+ */
+function isBoringRevertError(errorMsg: string): boolean {
+  if (!errorMsg) return false;
+  const lower = errorMsg.toLowerCase();
+  const boringPatterns = [
+    'execution reverted',
+    'revert',
+    'insufficient',
+    'incorrectethervalue',
+    'wrongether',
+    'notenough',
+    'underpriced',
+    'value mismatch',
+    'missing',
+    'require: false',
+    'safeerc20',
+    'transferfailed',
+    'mintnotactive',
+    'paused',
+    'notstarted',
+    'sale not',
+    'allowlist',
+    'whitelist',
+    'not allowed',
+  ];
+  return boringPatterns.some(p => lower.includes(p));
+}
+
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
   recordMintAttempt();
+
+  // Pre-mint Telegram notification — let user see the bot is alive + working
+  // For blind-mint candidates, ALWAYS notify (user wants to see attempts)
+  void notifyCandidateFound({
+    contract: candidate.contract,
+    functionName: candidate.functionName,
+    chain: candidate.chain || 'base',
+    collectionName: candidate.name,
+    source: candidate.source,
+    openseaUrl: candidate.opensea_url,
+  }).catch(() => {});
+
   try {
     const chainKey = candidate.chain || 'base';
     const { smartAccountClient, smartAccountAddress, chainConfig } = await initSmartAccount(chainKey);
@@ -697,6 +758,7 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
     recordMintSuccess();
+    LAST_MINT_TIMESTAMP = Date.now();
 
     // Notify Telegram (fire-and-forget — don't block on failure)
     void notifyMintSuccess({
@@ -715,24 +777,37 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     return result;
   } catch (err: any) {
     const chainKey = candidate.chain || 'base';
+    const errorMsg = err?.message || String(err);
     const result: MintResult = {
       candidate,
       success: false,
-      error: err?.message || String(err),
+      error: errorMsg,
     };
     RECENT_MINTS.unshift(result);
     if (RECENT_MINTS.length > MAX_LOG_SIZE) RECENT_MINTS.pop();
     ATTEMPTED.add(`${chainKey}:${candidate.contract}`);
     recordMintFailure();
 
-    // Notify Telegram (fire-and-forget)
-    void notifyMintFailure({
-      contract: candidate.contract,
-      functionName: candidate.functionName,
-      error: err?.message || String(err),
-      collectionName: candidate.name,
-      chain: chainKey,
-    }).catch(() => {});
+    // SPAM FILTER: skip TG notification for "boring" reverts (paid mints, wrong args)
+    // These are EXPECTED during blind-mint — would generate 50+ msgs/hour otherwise.
+    // Only notify on UNEXPECTED errors (network issues, RPC failures, etc).
+    if (!isBoringRevertError(errorMsg)) {
+      void notifyMintFailure({
+        contract: candidate.contract,
+        functionName: candidate.functionName,
+        error: errorMsg,
+        collectionName: candidate.name,
+        chain: chainKey,
+      }).catch(() => {});
+    } else {
+      // Still log it locally so user can see in dashboard
+      logActivity({
+        type: 'mint_failed_silent',
+        message: `🎲 blind revert on ${candidate.name?.slice(0, 30)} (${chainKey}): ${errorMsg.slice(0, 60)}`,
+        chain: chainKey,
+        contract: candidate.contract,
+      });
+    }
 
     return result;
   }
@@ -750,15 +825,36 @@ export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
   candidates: MintCandidate[];
   results: MintResult[];
 }> {
+  SCAN_COUNTER += 1;
+
+  // Fire heartbeat every Nth scan so user knows cron is alive
+  if (SCAN_COUNTER % HEARTBEAT_INTERVAL === 0) {
+    const lastMintAgo = LAST_MINT_TIMESTAMP
+      ? Math.floor((Date.now() - LAST_MINT_TIMESTAMP) / 1000)
+      : null;
+    void notifyHeartbeat({
+      scanNumber: SCAN_COUNTER,
+      totalScans: SCAN_COUNTER,
+      lastMintAgoSec: lastMintAgo,
+      nextScanInSec: 60,
+    }).catch(() => {});
+  }
+
   try {
     const candidates1 = await scanForFreeMints(maxMintsPerCycle * 3);
     const results: MintResult[] = [];
 
+    let succeeded = 0;
+    let failed = 0;
+
     for (const candidate of (candidates1 || []).slice(0, maxMintsPerCycle)) {
       try {
         const result = await executeMint(candidate);
+        if (result.success) succeeded++;
+        else failed++;
         results.push(result);
       } catch (e: any) {
+        failed++;
         results.push({
           candidate,
           success: false,
@@ -768,6 +864,18 @@ export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
     }
 
     recordScan((candidates1 || []).length, []);
+
+    // Send scan summary ONLY when there were candidates or mints attempted
+    // (skip when scan returned 0 candidates to avoid 1440 silent msgs per day)
+    if ((candidates1 || []).length > 0 || results.length > 0) {
+      void notifyScanSummary({
+        candidatesFound: (candidates1 || []).length,
+        mintsAttempted: results.length,
+        mintsSucceeded: succeeded,
+        mintsFailed: failed,
+        scannedContracts: (candidates1 || []).length,
+      }).catch(() => {});
+    }
 
     return {
       scanned: (candidates1 || []).length,
