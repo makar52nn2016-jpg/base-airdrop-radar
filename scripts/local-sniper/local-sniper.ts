@@ -41,13 +41,14 @@ import { getClientsForChain, type ChainKey } from '@/lib/pimlico';
 import { isAlchemyConfiguredAsync } from '@/lib/alchemy-scanner';
 
 // ============================================================================
-// CONFIGURATION — Maximum throughput
+// CONFIGURATION — MAXIMUM OVERDRIVE (300% power)
 // ============================================================================
 
-const SCAN_INTERVAL_MS = 5_000;          // 5 сек между сканов (Vercel: 60 сек)
-const MAX_MINTS_PER_CYCLE = 20;            // 20 ментов за цикл (Vercel: 3)
-const MAX_CANDIDATES_PER_SCAN = 50;        // 50 кандидатов за скан (Vercel: 15)
+const SCAN_INTERVAL_MS = 1_000;          // 1 сек между сканов (было 5)
+const MAX_MINTS_PER_CYCLE = 50;            // 50 ментов за цикл (было 20)
+const MAX_CANDIDATES_PER_SCAN = 200;       // 200 кандидатов за скан (было 50)
 const DASHBOARD_REFRESH_MS = 500;          // refresh каждые 500ms
+const PARALLEL_MINT_BATCH_SIZE = 5;        // 5 параллельных mint attempts (было sequential)
 const SCAN_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum'];
 
 // ============================================================================
