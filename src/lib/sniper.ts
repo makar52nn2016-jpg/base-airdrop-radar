@@ -271,11 +271,22 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   // Strategy 0: Direct on-chain mint event scan via getLogs (ERC-721 + ERC-1155)
   // Catches ALL mints on each chain, not just the ones OpenSea tracks.
   // Block range = 200 (~5 min on L2, ~25 min on L1)
-  // Run all 5 chains IN PARALLEL via Promise.all — saves ~20s vs sequential
+  // Run all 3 chains IN PARALLEL via Promise.all — saves ~20s vs sequential
   const chainScanPromises = ALL_CHAINS.map(async (chainKey): Promise<MintCandidate[]> => {
     try {
+      // Strategy 0a: On-chain getLogs (mint events)
       const chainCandidates = await scanRecentMintsViaLogs(chainKey);
       logChainScan(chainKey, chainCandidates.length);
+
+      // Strategy 0b: Contract deployment scan (NEW — first-mover advantage)
+      if (chainCandidates.length < 3) {
+        try {
+          const { scanRecentContractDeployments } = await import('@/lib/deployment-scanner');
+          const deployCandidates = await scanRecentContractDeployments(chainKey, 2);
+          return [...chainCandidates, ...deployCandidates];
+        } catch {}
+      }
+
       return chainCandidates;
     } catch (err: any) {
       logError(`Chain ${chainKey} scan failed: ${err.message?.slice(0, 80)}`);
