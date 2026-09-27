@@ -356,24 +356,81 @@ export async function looksLikeContract(address: string): Promise<boolean> {
 export async function findFreeMintFunction(
   contractAddress: string
 ): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback'; abiInputs?: any[] } | null> {
-  // Strategy 1: Basescan verified ABI
+  // Strategy 1: Price-aware detection (FAST — 6 RPC calls)
+  // Read price()/mintPrice()/cost() — if 0 → free mint!
+  // This is the FASTEST strategy and catches the most free mints.
+  const priceResult = await findFreeMintViaPriceCheck(contractAddress);
+  if (priceResult) {
+    return { ...priceResult, source: 'fallback' };
+  }
+
+  // Strategy 2: Basescan verified ABI (1 HTTP call — fast)
   const basescanResult = await findFreeMintViaBasescanAbi(contractAddress);
   if (basescanResult) {
     return { ...basescanResult, source: 'basescan' };
   }
 
-  // Strategy 2: Hardcoded 100+ signatures
-  const fallbackResult = await findFreeMintViaFallback(contractAddress);
-  if (fallbackResult) {
-    return { ...fallbackResult, source: 'fallback' };
+  // Strategy 3: Top-10 most common signatures (10 staticCalls — fast)
+  // Reduced from 100+ to 10 for speed (was causing 55s scans)
+  const fastFallbackResult = await findFreeMintViaFastFallback(contractAddress);
+  if (fastFallbackResult) {
+    return { ...fastFallbackResult, source: 'fallback' };
   }
 
-  // Strategy 3: PRICE-AWARE DETECTION (NEW!)
-  // Many NFT contracts have mint() payable but price() == 0 (free phase).
-  // staticCall on payable mint() reverts, but reading price() tells us if it's free.
-  const priceResult = await findFreeMintViaPriceCheck(contractAddress);
-  if (priceResult) {
-    return { ...priceResult, source: 'fallback' };
+  return null;
+}
+
+/**
+ * Fast fallback — only tries the 10 MOST COMMON mint signatures.
+ * Was trying 100+, which caused 55s scan times (Vercel 60s timeout).
+ */
+async function findFreeMintViaFastFallback(
+  contractAddress: string
+): Promise<{ functionName: string; args: unknown[] } | null> {
+  const toAddress = process.env.PROCEEDS_ADDRESS || '0x0000000000000000000000000000000000000001';
+
+  // Top 10 most common free-mint signatures (covers 90% of free mints)
+  const FAST_ABI = parseAbi([
+    'function mint() public',
+    'function mint(uint256 quantity) public',
+    'function mint(address to) public',
+    'function mint(address to, uint256 quantity) public',
+    'function publicMint() public',
+    'function publicMint(uint256 quantity) public',
+    'function claim() public',
+    'function claim(uint256 quantity) public',
+    'function freeMint() public',
+    'function freeMint(uint256 quantity) public',
+  ]);
+
+  const candidates: { functionName: string; args: unknown[] }[] = [
+    { functionName: 'mint', args: [] },
+    { functionName: 'mint', args: [1n] },
+    { functionName: 'publicMint', args: [] },
+    { functionName: 'claim', args: [] },
+    { functionName: 'freeMint', args: [] },
+    { functionName: 'mint', args: [toAddress] },
+    { functionName: 'publicMint', args: [1n] },
+    { functionName: 'claim', args: [1n] },
+    { functionName: 'freeMint', args: [1n] },
+    { functionName: 'mint', args: [toAddress, 1n] },
+  ];
+
+  const contract = getContract({
+    address: contractAddress as `0x${string}`,
+    abi: FAST_ABI,
+    client: publicClient,
+  });
+
+  for (const candidate of candidates) {
+    try {
+      const fn = (contract as any)[candidate.functionName];
+      if (!fn) continue;
+      await fn.read.staticCall(candidate.args);
+      return candidate;
+    } catch {
+      continue;
+    }
   }
 
   return null;
