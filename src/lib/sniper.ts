@@ -750,30 +750,37 @@ export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
   candidates: MintCandidate[];
   results: MintResult[];
 }> {
-  // First scan
-  const candidates1 = await scanForFreeMints(maxMintsPerCycle * 3);
-  const results: MintResult[] = [];
+  try {
+    const candidates1 = await scanForFreeMints(maxMintsPerCycle * 3);
+    const results: MintResult[] = [];
 
-  for (const candidate of candidates1) {
-    if (results.length >= maxMintsPerCycle) break;
-    const result = await executeMint(candidate);
-    results.push(result);
+    for (const candidate of (candidates1 || []).slice(0, maxMintsPerCycle)) {
+      try {
+        const result = await executeMint(candidate);
+        results.push(result);
+      } catch (e: any) {
+        results.push({
+          candidate,
+          success: false,
+          error: e?.message || 'Mint execution error',
+        });
+      }
+    }
+
+    recordScan((candidates1 || []).length, []);
+
+    return {
+      scanned: (candidates1 || []).length,
+      candidates: candidates1 || [],
+      results,
+    };
+  } catch (e: any) {
+    return {
+      scanned: 0,
+      candidates: [],
+      results: [],
+    };
   }
-
-  // If no candidates found in first scan, try OpenSea-only scan (broader)
-  if (candidates1.length === 0) {
-    // The scanForFreeMints already tried both strategies (on-chain + OpenSea)
-    // No need for a third scan — just return results
-  }
-
-  // Record stats
-  recordScan(candidates1.length, candidates1.map((c) => c.contract));
-
-  return {
-    scanned: candidates1.length,
-    candidates: candidates1,
-    results,
-  };
 }
 
 /**
