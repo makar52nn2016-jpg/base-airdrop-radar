@@ -408,7 +408,7 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
   if (candidates.length === 0) {
     try {
       const { scanOpenSeaFloorZero } = await import('@/lib/opensea-scanner');
-      const floorCandidates = await scanOpenSeaFloorZero(maxCandidates, 15);
+      const floorCandidates = await scanOpenSeaFloorZero(maxCandidates, 5);
       for (const c of floorCandidates) {
         if (candidates.length >= maxCandidates) break;
         const dedupKey = `floor0:${c.contract}`;
