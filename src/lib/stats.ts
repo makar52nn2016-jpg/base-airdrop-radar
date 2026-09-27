@@ -166,20 +166,51 @@ export function getStats() {
 }
 
 /**
- * Syncs current in-memory state to Supabase (fire-and-forget, best-effort).
+ * Syncs current in-memory state to Supabase.
+ * MERGES with existing persisted state (doesn't overwrite).
  * Called after each state change (scan, mint, activity event).
  */
 let lastSyncTime = 0;
-const SYNC_INTERVAL_MS = 100; // sync every 100ms (was 1s — was too slow, missed events)
+const SYNC_INTERVAL_MS = 100;
 
-export function syncToSupabase() {
+export async function syncToSupabase() {
   const now = Date.now();
-  if (now - lastSyncTime < SYNC_INTERVAL_MS) return; // rate limit
+  if (now - lastSyncTime < SYNC_INTERVAL_MS) return;
   lastSyncTime = now;
 
+  // Load existing persisted state from Supabase (to avoid overwriting on cold start)
+  let existingLog: any[] = [];
+  try {
+    const { loadBotState } = await import('@/lib/supabase');
+    const persisted = await loadBotState<any>();
+    if (persisted?.activityLog) {
+      existingLog = persisted.activityLog;
+    }
+  } catch {}
+
+  // Merge: existing persisted events + new in-memory events (dedup by ts)
+  const mergedLog = [...stats.activityLog, ...existingLog];
+  const seen = new Set<string>();
+  const deduped = mergedLog.filter((ev) => {
+    if (seen.has(ev.ts)) return false;
+    seen.add(ev.ts);
+    return true;
+  }).slice(0, 50);
+
   void persistBotState({
-    stats: { ...stats, scannedContracts: undefined, activityLog: undefined },
-    activityLog: [...stats.activityLog].slice(0, 30),
-    recentMints: [], // recentMints are in sniper.ts, not stats.ts — skip for now
+    stats: {
+      totalScans: stats.totalScans,
+      totalCandidatesDetected: stats.totalCandidatesDetected,
+      totalMintsAttempted: stats.totalMintsAttempted,
+      totalMintsSucceeded: stats.totalMintsSucceeded,
+      totalMintsFailed: stats.totalMintsFailed,
+      lastScanAt: stats.lastScanAt,
+      lastMintAt: stats.lastMintAt,
+      firstRunAt: stats.firstRunAt,
+      botState: stats.botState,
+      currentChainBeingScanned: stats.currentChainBeingScanned,
+    },
+    activityLog: deduped,
+    recentMints: [],
   }).catch(() => {});
 }
