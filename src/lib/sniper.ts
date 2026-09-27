@@ -95,8 +95,12 @@ const MAX_LOG_SIZE = 100;
 // already attempted). With 15min TTL, contracts become re-eligible for retry
 // 4x faster. Pimlico simulation reverts are FREE (no gas spent), so retrying
 // more often doesn't cost ETH.
+// v4 — TTL increased back to 1 hour — user complained bot was repeating same
+// 3 contracts (0x00cd04, 0xfb3ee9, 0x3a0d17) every cycle. With 15min TTL, after
+// 33 min uptime, all early contracts had expired TTL → being retried.
+// 1 hour TTL = no repeats for 1 hour after first attempt.
 const ATTEMPTED = new Map<string, number>(); // key = `${chain}:${contract}`, value = unix ms
-const ATTEMPTED_TTL_MS = 15 * 60 * 1000; // 15 minutes (was 1 hour)
+const ATTEMPTED_TTL_MS = 60 * 60 * 1000; // 1 hour (was 15 minutes)
 
 // TG notification cooldown — separate from ATTEMPTED (which blocks mint retry).
 // Even if we re-attempt a mint after 15min TTL, we don't spam TG about the same
@@ -548,19 +552,18 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
   // mainnet.base.org and mainnet.optimism.io DON'T support address-less getLogs.
   // OpenSea API catches mints on ALL chains and is reliable.
   //
-  // v3 — EXPANDED window from 30min back to 6h. With persistent dedup working
-  // (Supabase), we can safely scan wider window — already-attempted contracts
-  // get filtered out. Wider window = more unattempted candidates per scan
-  // = higher chance of catching a free mint when one appears.
+  // v4 — EXPANDED window from 6h to 12h. User reported bot was repeating same
+  // 3 contracts every cycle. With wider window + 1-hour TTL, bot sees more
+  // unattempted candidates per scan → less repetition, more variety.
   try {
-    const events = await getRecentBaseTransfers(100, 6 * 3600, 3);
+    const events = await getRecentBaseTransfers(100, 12 * 3600, 4);
     const mintContracts = filterMintEventsForChains(events, [
       'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
     ]);
 
     logActivity({
       type: 'chain_scan',
-      message: `OpenSea: ${events.length} events (6h window), ${mintContracts.length} mint contracts found`,
+      message: `OpenSea: ${events.length} events (12h window, 4 pages), ${mintContracts.length} mint contracts found`,
     });
 
     for (const { contract: contractAddress, slug, chain } of mintContracts) {

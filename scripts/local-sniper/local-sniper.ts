@@ -41,10 +41,10 @@ import { getClientsForChain, type ChainKey } from '@/lib/pimlico';
 import { isAlchemyConfiguredAsync } from '@/lib/alchemy-scanner';
 
 // ============================================================================
-// CONFIGURATION — MAXIMUM OVERDRIVE (300% power)
+// CONFIGURATION — MAXIMUM OVERDRIVE (300% power) v2
 // ============================================================================
 
-const SCAN_INTERVAL_MS = 1_000;          // 1 сек между сканов (было 5)
+const SCAN_INTERVAL_MS = 3_000;          // 3 сек между сканов (было 1 — слишком часто, дёргалось)
 const MAX_MINTS_PER_CYCLE = 50;            // 50 ментов за цикл (было 20)
 const MAX_CANDIDATES_PER_SCAN = 200;       // 200 кандидатов за скан (было 50)
 const DASHBOARD_REFRESH_MS = 500;          // refresh каждые 500ms
