@@ -359,10 +359,51 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
       }
     }
   } catch (err) {
-    // If events API fails, fall through to collections list
+    // If events API fails, fall through to social/whale strategies
   }
 
-  // Strategy 2 (fallback): Top collections from list
+  // Strategy 2: Social Signal Scanner (PROACTIVE — searches social media)
+  if (candidates.length < maxCandidates) {
+    try {
+      const { scanSocialMediaForMints } = await import('@/lib/social-scanner');
+      const socialCandidates = await scanSocialMediaForMints(maxCandidates - candidates.length);
+      for (const c of socialCandidates) {
+        if (candidates.length >= maxCandidates) break;
+        const dedupKey = `social:${c.contract}`;
+        if (tried.has(dedupKey)) continue;
+        tried.add(dedupKey);
+        allScannedAddresses.push(c.contract);
+        candidates.push(c);
+      }
+    } catch (err: any) {
+      logError(`Social scan failed: ${err.message?.slice(0, 80)}`);
+    }
+  }
+
+  // Strategy 3: Whale Copy-Minting (SMART — copies pro farmers)
+  if (candidates.length < maxCandidates) {
+    try {
+      const { scanWhaleMints } = await import('@/lib/whale-tracker');
+      for (const chainKey of ALL_CHAINS) {
+        if (candidates.length >= maxCandidates) break;
+        try {
+          const whaleCandidates = await scanWhaleMints(chainKey, 3);
+          for (const c of whaleCandidates) {
+            if (candidates.length >= maxCandidates) break;
+            const dedupKey = `whale:${c.contract}`;
+            if (tried.has(dedupKey)) continue;
+            tried.add(dedupKey);
+            allScannedAddresses.push(c.contract);
+            candidates.push(c);
+          }
+        } catch {}
+      }
+    } catch (err: any) {
+      logError(`Whale scan failed: ${err.message?.slice(0, 80)}`);
+    }
+  }
+
+  // Strategy 4 (fallback): Top collections from list
   if (candidates.length === 0) {
     const collections = await listBaseCollections(50);
 
