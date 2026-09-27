@@ -608,7 +608,69 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
     if (candidates.length >= maxCandidates) break;
   }
 
-  // Strategy 2: Social Signal Scanner (PROACTIVE — searches social media)
+  // Strategy 2: Alchemy NFT API — find recent mints via alchemy_getAssetTransfers
+  // This is more reliable than eth_getLogs on public RPCs (Alchemy indexes events).
+  // Runs in PARALLEL across Base, Optimism, Arbitrum.
+  // Requires ALCHEMY_API_KEY env var (free tier 25k req/month).
+  if (candidates.length < maxCandidates) {
+    try {
+      const { scanAlchemyMintsAcrossChains, isAlchemyConfigured } = await import('@/lib/alchemy-scanner');
+      if (isAlchemyConfigured()) {
+        // Scan all 3 L2 chains in parallel — get fresh mints from each
+        const alchemyContracts = await scanAlchemyMintsAcrossChains(
+          ['base', 'optimism', 'arbitrum'],
+          500 // last 500 blocks per chain (~17 min on Base, ~30 min on OP/ARB)
+        );
+
+        logActivity({
+          type: 'chain_scan',
+          message: `Alchemy: ${alchemyContracts.length} mint events found across base+optimism+arbitrum`,
+        });
+
+        for (const { contract: contractAddress, chain: alchemyChain } of alchemyContracts) {
+          if (candidates.length >= maxCandidates) break;
+          const dedupKey = `alchemy:${alchemyChain}:${contractAddress}`;
+          if (tried.has(dedupKey)) continue;
+          tried.add(dedupKey);
+
+          // Skip if already attempted in last 15 min (same TTL as ATTEMPTED)
+          const chainKey: ChainKey = openSeaToChainKey[alchemyChain] || 'base';
+          if (isRecentlyAttempted(chainKey, contractAddress)) continue;
+
+          allScannedAddresses.push(contractAddress);
+
+          // Detect mint function via basescan + price check (same as OpenSea strategy)
+          const found = await findFreeMintFunction(contractAddress);
+          if (found) {
+            logActivity({
+              type: 'candidate_found',
+              message: `🚀 Alchemy: ${contractAddress.slice(0, 12)}... on ${chainKey} — ${found.functionName}() [${found.source}]`,
+              contract: contractAddress,
+              chain: chainKey,
+            });
+
+            candidates.push({
+              slug: `alchemy-${alchemyChain}`,
+              name: `Alchemy mint ${contractAddress.slice(0, 8)}`,
+              contract: contractAddress,
+              functionName: found.functionName,
+              args: found.args,
+              detectedAt: new Date().toISOString(),
+              image_url: null,
+              opensea_url: `https://opensea.io/assets/${alchemyChain === 'matic' ? 'matic' : alchemyChain}/${contractAddress}`,
+              source: found.source,
+              abiInputs: found.abiInputs,
+              chain: chainKey,
+            });
+          }
+        }
+      }
+    } catch (err: any) {
+      logError(`Alchemy scan failed: ${err.message?.slice(0, 80)}`);
+    }
+  }
+
+  // Strategy 3: Social Signal Scanner (PROACTIVE — searches social media)
   if (candidates.length < maxCandidates) {
     try {
       const { scanSocialMediaForMints } = await import('@/lib/social-scanner');
@@ -626,7 +688,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
     }
   }
 
-  // Strategy 3: Whale Copy-Minting (SMART — copies pro farmers)
+  // Strategy 4: Whale Copy-Minting (SMART — copies pro farmers)
   if (candidates.length < maxCandidates) {
     try {
       const { scanWhaleMints } = await import('@/lib/whale-tracker');
@@ -649,7 +711,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
     }
   }
 
-  // Strategy 4 (fallback): Top collections from list
+  // Strategy 5 (fallback): Top collections from list
   // v2 — now uses OpenSea floor=0 scanner for targeted free-mint detection
   if (candidates.length === 0) {
     try {
