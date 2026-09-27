@@ -292,17 +292,79 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
     ethereum: 'ethereum',
   };
 
-  // Strategy 0: Direct on-chain mint event scan via getLogs (ERC-721 + ERC-1155)
-  // Catches ALL mints on each chain, not just the ones OpenSea tracks.
-  // Block range = 200 (~5 min on L2, ~25 min on L1)
-  // Run all 3 chains IN PARALLEL via Promise.all — saves ~20s vs sequential
+  // Strategy 1: OpenSea events API — PRIMARY strategy (works on ALL chains)
+  // mainnet.base.org and mainnet.optimism.io DON'T support address-less getLogs.
+  // OpenSea API catches mints on ALL chains and is reliable.
+  try {
+    const events = await getRecentBaseTransfers(100, 6 * 3600, 1);
+    const mintContracts = filterMintEventsForChains(events, [
+      'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
+    ]);
+
+    logActivity({
+      type: 'chain_scan',
+      message: `OpenSea: ${events.length} events, ${mintContracts.length} mint contracts found`,
+    });
+
+    for (const { contract: contractAddress, slug, chain } of mintContracts) {
+      if (candidates.length >= maxCandidates) break;
+      const dedupKey = `${chain}:${contractAddress}`;
+      if (tried.has(dedupKey)) continue;
+      tried.add(dedupKey);
+      allScannedAddresses.push(contractAddress);
+
+      const chainKey: ChainKey = openSeaToChainKey[chain] || 'base';
+
+      let actualSlug = slug;
+      let collectionName: string | undefined;
+      let collectionImageUrl: string | null = null;
+      if (!actualSlug) {
+        try {
+          const info = await getAssetContractInfo(contractAddress);
+          if (info) {
+            actualSlug = info.collection;
+            collectionName = info.name;
+            collectionImageUrl = info.image_url;
+            if (isSpammyName(info.name || '')) continue;
+          }
+        } catch {}
+      }
+
+      const found = await findFreeMintFunction(contractAddress);
+      if (found) {
+        logActivity({
+          type: 'candidate_found',
+          message: `🚀 OpenSea: FREE MINT at ${contractAddress.slice(0, 12)}... on ${chainKey} — ${found.functionName}()`,
+          contract: contractAddress,
+          chain: chainKey,
+        });
+        candidates.push({
+          slug: actualSlug || 'recent-mint',
+          name: collectionName || `OpenSea mint ${contractAddress.slice(0, 8)}`,
+          contract: contractAddress,
+          functionName: found.functionName,
+          args: found.args,
+          detectedAt: new Date().toISOString(),
+          image_url: collectionImageUrl,
+          opensea_url: `https://opensea.io/assets/${chain}/${contractAddress}`,
+          source: found.source,
+          abiInputs: found.abiInputs,
+          chain: chainKey,
+        });
+      }
+    }
+  } catch (err: any) {
+    logError(`OpenSea scan failed: ${err.message?.slice(0, 80)}`);
+  }
+
+  // Strategy 0: On-chain getLogs + deployment scan (SECONDARY — only on arbitrum where it works)
+  // mainnet.base.org returns 0 results for address-less getLogs (confirmed by testing).
+  // arb1.arbitrum.io DOES support getLogs.
   const chainScanPromises = ALL_CHAINS.map(async (chainKey): Promise<MintCandidate[]> => {
     try {
-      // Strategy 0a: On-chain getLogs (mint events)
       const chainCandidates = await scanRecentMintsViaLogs(chainKey);
       logChainScan(chainKey, chainCandidates.length);
 
-      // Strategy 0b: Contract deployment scan (NEW — first-mover advantage)
       if (chainCandidates.length < 3) {
         try {
           const { scanRecentContractDeployments } = await import('@/lib/deployment-scanner');
@@ -333,70 +395,6 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
       logCandidateFound(c.chain || 'unknown', c.contract, c.functionName);
     }
     if (candidates.length >= maxCandidates) break;
-  }
-
-  // Strategy 1: Recent mint events from OpenSea API (across ALL supported chains)
-  // Reduced from 300 to 100 events (single page) — Strategy 0 (on-chain getLogs)
-  // already catches all mints on each chain, OpenSea is redundant + slow.
-  try {
-    const events = await getRecentBaseTransfers(100, 6 * 3600, 1); // 1 page = 100 events
-    const mintContracts = filterMintEventsForChains(events, [
-      'base',
-      'optimism',
-      'arbitrum',
-      'matic',
-      'ethereum',
-    ]);
-
-    for (const { contract: contractAddress, slug, chain } of mintContracts) {
-      if (candidates.length >= maxCandidates) break;
-      const dedupKey = `${chain}:${contractAddress}`;
-      if (tried.has(dedupKey)) continue;
-      if (ATTEMPTED.has(dedupKey)) continue;
-      tried.add(dedupKey);
-      allScannedAddresses.push(contractAddress);
-
-      const chainKey: ChainKey = openSeaToChainKey[chain] || 'base';
-
-      // Quality check: get contract info from OpenSea, check for spam
-      let actualSlug = slug;
-      let collectionName: string | undefined;
-      let collectionImageUrl: string | null = null;
-      if (!actualSlug) {
-        try {
-          const info = await getAssetContractInfo(contractAddress);
-          if (info) {
-            actualSlug = info.collection;
-            collectionName = info.name;
-            collectionImageUrl = info.image_url;
-            if (isSpammyName(info.name || '')) {
-              continue; // skip spam
-            }
-          }
-        } catch {
-          // OpenSea lookup failed — continue without it
-        }
-      }
-
-      const found = await findFreeMintFunction(contractAddress);
-      if (found) {
-        candidates.push({
-          slug: actualSlug || 'recent-mint',
-          name: collectionName || `Recent mint ${contractAddress.slice(0, 8)}`,
-          contract: contractAddress,
-          functionName: found.functionName,
-          args: found.args,
-          detectedAt: new Date().toISOString(),
-          image_url: collectionImageUrl,
-          opensea_url: `https://opensea.io/assets/${chain}/${contractAddress}`,
-          source: found.source,
-          abiInputs: found.abiInputs,
-          chain: chainKey,
-        });
-      }
-    }
-  } catch (err) {
-    // If events API fails, fall through to social/whale strategies
   }
 
   // Strategy 2: Social Signal Scanner (PROACTIVE — searches social media)
