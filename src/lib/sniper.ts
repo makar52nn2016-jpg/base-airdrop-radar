@@ -118,17 +118,26 @@ export async function initSmartAccount(chainKey: ChainKey = 'base') {
     version: '1.4.1',
   });
 
-  const smartAccountClient = createSmartAccountClient({
+  // Build smartAccountClient config — paymasterContext only included if
+  // PIMLICO_SPONSOR_POLICY_ID is actually set (otherwise empty object {}
+  // gets passed, which Pimlico rejects with -32601 method-not-found).
+  const clientConfig: any = {
     account: smartAccount,
     chain: CHAIN_CONFIGS[chainKey].chain,
     bundlerTransport: http(
       `https://api.pimlico.io/v2/${chainKey}/rpc?apikey=${process.env.PIMLICO_API_KEY}`
     ),
     paymaster: pmc,
-    paymasterContext: {
-      policyId: process.env.PIMLICO_SPONSOR_POLICY_ID,
-    },
-  });
+  };
+
+  const sponsorPolicyId = process.env.PIMLICO_SPONSOR_POLICY_ID;
+  if (sponsorPolicyId) {
+    clientConfig.paymasterContext = { policyId: sponsorPolicyId };
+  }
+  // If no sponsor policy ID → Pimlico uses default verifying paymaster
+  // (which requires ETH on Smart Account — won't work gasless)
+
+  const smartAccountClient = createSmartAccountClient(clientConfig);
 
   return {
     smartAccount,

@@ -149,10 +149,16 @@ export function getSignerPrivateKey(): `0x${string}` {
 
 /**
  * Checks if Pimlico is configured.
+ * v2 — now also flags PIMLICO_SPONSOR_POLICY_ID as "warning" (not blocking,
+ * but gasless mints will fail without it).
  */
-export function isPimlicoConfigured(): { configured: boolean; missing: string[] } {
+export function isPimlicoConfigured(): { configured: boolean; missing: string[]; warnings: string[] } {
   const missing: string[] = [];
+  const warnings: string[] = [];
   if (!PIMLICO_API_KEY) missing.push('PIMLICO_API_KEY');
   if (!SIGNER_PRIVATE_KEY) missing.push('SIGNER_PRIVATE_KEY');
-  return { configured: missing.length === 0, missing };
+  if (!process.env.PIMLICO_SPONSOR_POLICY_ID) {
+    warnings.push('PIMLICO_SPONSOR_POLICY_ID (gasless mints WILL FAIL without it — get from https://dashboard.pimlico.io/sponsorship-policies)');
+  }
+  return { configured: missing.length === 0, missing, warnings };
 }

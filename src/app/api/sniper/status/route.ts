@@ -66,7 +66,11 @@ export async function GET() {
   return NextResponse.json({
     timestamp: new Date().toISOString(),
     config: {
-      pimlico: { configured: pimlicoStatus.configured, missing_env_vars: pimlicoStatus.missing },
+      pimlico: {
+        configured: pimlicoStatus.configured,
+        missing_env_vars: pimlicoStatus.missing,
+        warnings: pimlicoStatus.warnings || [],
+      },
       opensea: { configured: openseaConfigured },
       telegram: { configured: telegramConfigured },
       supabase: { configured: supabaseConfigured },
