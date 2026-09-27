@@ -897,10 +897,46 @@ function isBoringRevertError(errorMsg: string): boolean {
 export async function executeMint(candidate: MintCandidate): Promise<MintResult> {
   recordMintAttempt(candidate.contract, candidate.chain || 'base');
 
+  const chainKey = candidate.chain || 'base';
+
+  // v3: BALANCE CHECK before mint attempt.
+  // User reported bot was attempting mints on chains where Smart Account has 0 ETH
+  // (arbitrum/optimism). Every such mint reverts in simulation — wasted UserOp slot,
+  // and prevents a useful Base mint from being attempted that cycle.
+  // Skip if Smart Account has < 0.00005 ETH (~$0.15) on the candidate's chain.
+  const MIN_ETH_FOR_GAS = 0.00005n * 10n ** 18n; // 0.00005 ETH in wei
+  try {
+    const { publicClient: pc } = getClientsForChain(chainKey);
+    const balance: bigint = await pc.getBalance({
+      address: (await initSmartAccount(chainKey)).smartAccountAddress,
+    });
+    if (balance < MIN_ETH_FOR_GAS) {
+      const balanceEth = Number(balance) / 1e18;
+      logActivity({
+        type: 'mint_failure',
+        message: `Skip mint on ${chainKey} — Smart Account has only ${balanceEth.toFixed(6)} ETH (need ≥0.00005)`,
+        chain: chainKey,
+        contract: candidate.contract,
+      });
+      return {
+        candidate,
+        success: false,
+        error: `Insufficient ETH on ${chainKey} (balance: ${balanceEth.toFixed(6)} ETH, need ≥0.00005). Send ETH to Smart Account on ${chainKey} chain to enable minting there.`,
+      };
+    }
+  } catch (e: any) {
+    // Don't fail mint if balance check itself fails — proceed and let Pimlico catch it
+    logActivity({
+      type: 'error',
+      message: `Balance check failed on ${chainKey}: ${e?.message?.slice(0, 60)}`,
+      chain: chainKey,
+    });
+  }
+
   // Pre-mint Telegram notification — fire only if this contract hasn't been
   // notified in the last hour. Without this, every cold-start cycle would
   // spam the same 6 contracts in TG (exactly the user's complaint).
-  const chainKeyForNotify = candidate.chain || 'base';
+  const chainKeyForNotify = chainKey;
   if (!isRecentlyNotified(chainKeyForNotify, candidate.contract)) {
     markNotified(chainKeyForNotify, candidate.contract);
     void notifyCandidateFound({
@@ -922,7 +958,6 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
   }
 
   try {
-    const chainKey = candidate.chain || 'base';
     const { smartAccountClient, smartAccountAddress, chainConfig, bundlerClient: bc } = await initSmartAccount(chainKey);
 
     // Fetch current gas prices from Pimlico before mint.
@@ -1015,7 +1050,6 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
 
     return result;
   } catch (err: any) {
-    const chainKey = candidate.chain || 'base';
     const errorMsg = err?.message || String(err);
     const result: MintResult = {
       candidate,
