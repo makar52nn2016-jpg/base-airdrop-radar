@@ -41,10 +41,11 @@ import { getClientsForChain, type ChainKey } from '@/lib/pimlico';
 import { isAlchemyConfiguredAsync } from '@/lib/alchemy-scanner';
 
 // ============================================================================
-// CONFIGURATION — MAXIMUM OVERDRIVE (300% power) v2
+// CONFIGURATION — MAXIMUM OVERDRIVE (300% power) v3 — Smart Backoff
 // ============================================================================
 
-const SCAN_INTERVAL_MS = 3_000;          // 3 сек между сканов (было 1 — слишком часто, дёргалось)
+const SCAN_INTERVAL_MS = 3_000;          // 3 сек между сканов (normal)
+const SCAN_INTERVAL_BACKOFF_MS = 15_000;  // 15 сек когда нет новых кандидатов (smart backoff)
 const MAX_MINTS_PER_CYCLE = 50;            // 50 ментов за цикл (было 20)
 const MAX_CANDIDATES_PER_SCAN = 200;       // 200 кандидатов за скан (было 50)
 const DASHBOARD_REFRESH_MS = 500;          // refresh каждые 500ms
@@ -201,7 +202,10 @@ async function renderDashboard(isScanning: boolean): Promise<void> {
     }
     console.log();
   } else if (totalScansLocal > 0) {
-    console.log(`  ${c.dim}Last cycle: no candidates found (all already attempted)${c.reset}`);
+    console.log(`  ${c.yellow}⏳ Last cycle: NO NEW candidates found${c.reset}`);
+    console.log(`  ${c.dim}   All contracts in OpenSea 12h window already attempted.${c.reset}`);
+    console.log(`  ${c.dim}   Smart backoff: next scan in 15 sec (instead of 3 sec).${c.reset}`);
+    console.log(`  ${c.dim}   Waiting for fresh mint contracts to appear in OpenSea...${c.reset}`);
     console.log();
   }
 
@@ -520,7 +524,10 @@ async function main(): Promise<void> {
     await renderDashboard(true);
     await executeScanCycle();
 
-    nextScanAt = Date.now() + SCAN_INTERVAL_MS;
+    // Smart backoff — if scan found 0 new candidates, wait longer (15s instead of 3s)
+    // This saves CPU when OpenSea 12h window has no new contracts
+    const scanInterval = lastCycleResults.length === 0 ? SCAN_INTERVAL_BACKOFF_MS : SCAN_INTERVAL_MS;
+    nextScanAt = Date.now() + scanInterval;
   }
 }
 
