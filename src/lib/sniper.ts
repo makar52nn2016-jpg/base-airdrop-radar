@@ -98,13 +98,33 @@ let LAST_MINT_TIMESTAMP: number | null = null;
 const HEARTBEAT_INTERVAL = 10; // every 10 scans (≈10 min if cron = 1 min)
 
 /**
+ * Pimlico's custom EntryPoint addresses on L2 chains.
+ *
+ * The canonical viem addresses (entryPoint06Address / entryPoint07Address from
+ * viem/chains) are NOT deployed on Base, Optimism, or Arbitrum. Pimlico has
+ * deployed their own EntryPoint contracts at different addresses. Without
+ * overriding these, pm_getPaymasterStubData fails with -32601 "Validation error"
+ * because the bundler can't find the entryPoint that viem computed the UserOp for.
+ *
+ * Discovered via `eth_supportedEntryPoints` on Pimlico v2 RPC.
+ * Verified via `eth_getCode` on Base mainnet RPC — these addresses ARE deployed.
+ *
+ * v0.6 only is the supported version on L2s through Pimlico's free tier.
+ */
+const PIMLICO_ENTRYPOINT_V06_ADDRESS =
+  '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789' as `0x${string}`;
+
+/**
  * Initializes the Pimlico Smart Account from the configured signer key.
  * Returns the smartAccount (with bundler client) and the derived address.
  *
- * v2 — supports multiple chains. Pass chainKey to init on a specific chain.
- * Each chain has a different Smart Account address (different Safe factory).
+ * v3 — uses Pimlico's custom v0.6 EntryPoint address (canonical viem address
+ * is NOT deployed on Base/L2 chains). Previously failed at pm_getPaymasterStubData
+ * with "method not available" because bundler couldn't find the entryPoint.
  *
- * Default: chainKey='base' for backward compat.
+ * NOTE: this changes the Smart Account address (it's derived from init code
+ * which depends on entryPoint version). Old address 0x21fd64... was derived
+ * with v0.7 entryPoint — won't be reachable anymore.
  */
 export async function initSmartAccount(chainKey: ChainKey = 'base') {
   const privateKey = getSignerPrivateKey();
@@ -116,6 +136,14 @@ export async function initSmartAccount(chainKey: ChainKey = 'base') {
     owners: [signer],
     threshold: 1n,
     version: '1.4.1',
+    // CRITICAL: Pimlico on L2 chains uses a different v0.6 EntryPoint address.
+    // The canonical viem address (0x5FF137D4b0FdcD35d5c04935a44dBd9E4c25101A)
+    // is NOT deployed on Base/Optimism/Arbitrum, causing pm_getPaymasterStubData
+    // to return "Validation error" (-32601).
+    entryPoint: {
+      address: PIMLICO_ENTRYPOINT_V06_ADDRESS,
+      version: '0.6',
+    },
   });
 
   // Build smartAccountClient config — paymasterContext only included if
