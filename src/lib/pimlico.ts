@@ -84,7 +84,11 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   },
 };
 
-export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'];
+// Only scan chains with working RPCs from Vercel.
+// polygon and ethereum RPCs fail from Vercel (401/connection issues).
+// They're still in CHAIN_CONFIGS (for /chains command) but not scanned.
+// OpenSea events API (Strategy 1) still catches mints on ALL chains.
+export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum'];
 
 // Cache clients per chain (creating clients is expensive)
 const clientCache = new Map<ChainKey, { publicClient: any; bundlerClient: any; paymasterClient: any }>();
