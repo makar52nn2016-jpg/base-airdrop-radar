@@ -904,7 +904,8 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
   // (arbitrum/optimism). Every such mint reverts in simulation — wasted UserOp slot,
   // and prevents a useful Base mint from being attempted that cycle.
   // Skip if Smart Account has < 0.00005 ETH (~$0.15) on the candidate's chain.
-  const MIN_ETH_FOR_GAS = 0.00005n * 10n ** 18n; // 0.00005 ETH in wei
+  // 0.00005 ETH = 50_000_000_000_000 wei (5 * 10^13)
+  const MIN_ETH_FOR_GAS = 50_000_000_000_000n; // 0.00005 ETH in wei
   try {
     const { publicClient: pc } = getClientsForChain(chainKey);
     const balance: bigint = await pc.getBalance({
