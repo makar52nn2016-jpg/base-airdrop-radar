@@ -32,6 +32,7 @@ import {
   logChainScan,
   logCandidateFound,
   logError,
+  logActivity,
 } from '@/lib/stats';
 import { notifyMintSuccess, notifyMintFailure, notifyListingLink } from '@/lib/telegram';
 import { checkContractQuality, isSpammyName } from '@/lib/quality';
