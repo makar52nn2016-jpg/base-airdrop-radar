@@ -46,37 +46,39 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    // Pimlico as RPC provider — already works from Vercel (used for Smart Account)
-    // Supports eth_getLogs, eth_blockNumber, and all standard JSON-RPC methods
-    rpcUrl: `https://api.pimlico.io/v2/base/rpc?apikey=${PIMLICO_API_KEY}`,
+    // Official Base RPC — works for eth_blockNumber (getLogs may fail, that's OK)
+    rpcUrl: 'https://mainnet.base.org',
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: `https://api.pimlico.io/v2/optimism/rpc?apikey=${PIMLICO_API_KEY}`,
+    rpcUrl: 'https://mainnet.optimism.io',
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
-    rpcUrl: `https://api.pimlico.io/v2/arbitrum/rpc?apikey=${PIMLICO_API_KEY}`,
+    // Arb1 official RPC — supports BOTH getBlockNumber AND getLogs ✅
+    rpcUrl: 'https://arb1.arbitrum.io/rpc',
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
   },
   polygon: {
     key: 'polygon',
     chain: polygon,
-    rpcUrl: `https://api.pimlico.io/v2/polygon/rpc?apikey=${PIMLICO_API_KEY}`,
+    // Official Polygon RPC — works for getBlockNumber
+    rpcUrl: 'https://polygon-rpc.com',
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    rpcUrl: `https://api.pimlico.io/v2/ethereum/rpc?apikey=${PIMLICO_API_KEY}`,
+    // Cloudflare ETH gateway — free, no API key
+    rpcUrl: 'https://cloudflare-eth.com',
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },

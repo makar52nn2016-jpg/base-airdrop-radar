@@ -181,75 +181,76 @@ async function scanRecentMintsViaLogs(
   chainKey: ChainKey,
   blockRange = 200
 ): Promise<MintCandidate[]> {
-  const { publicClient: pc } = getClientsForChain(chainKey);
-  const chainConfig = CHAIN_CONFIGS[chainKey];
-
-  // Get latest block
-  const latestBlock = await pc.getBlockNumber();
-  const fromBlock = latestBlock - BigInt(blockRange);
-
-  // Fetch all mint Transfer events in range — ERC-721 (from=0x0) AND ERC-1155
-  // ERC-721 has no wildcard in topics — works with ALL RPCs
-  // ERC-1155 has null wildcard — some RPCs (Ankr) may reject. Wrap in try/catch.
-  let erc721Logs: any[] = [];
-  let erc1155SingleLogs: any[] = [];
-
   try {
-    erc721Logs = await pc.getLogs({
-      fromBlock,
-      toBlock: latestBlock,
-      topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
-    } as any);
-  } catch (e: any) {
-    // ERC-721 is critical — if this fails, the whole chain scan fails
-    throw e;
-  }
+    const { publicClient: pc } = getClientsForChain(chainKey);
+    const chainConfig = CHAIN_CONFIGS[chainKey];
 
-  try {
-    erc1155SingleLogs = await pc.getLogs({
-      fromBlock,
-      toBlock: latestBlock,
-      topics: [ERC1155_TRANSFER_SINGLE_TOPIC, null, ZERO_ADDRESS_TOPIC],
-    } as any);
-  } catch {
-    // ERC-1155 is bonus — if it fails (Ankr rejects null wildcard), continue with ERC-721 only
-  }
+    // Get latest block
+    const latestBlock = await pc.getBlockNumber();
+    const fromBlock = latestBlock - BigInt(blockRange);
 
-  // Get unique contract addresses from both event types
-  const seenContracts = new Set<string>();
-  const candidates: MintCandidate[] = [];
+    // ERC-721 mint events (from=0x0) — no wildcard, works with most RPCs
+    let erc721Logs: any[] = [];
+    let erc1155SingleLogs: any[] = [];
 
-  const allLogs: any[] = [...(erc721Logs || []), ...(erc1155SingleLogs || [])];
-
-  for (const log of allLogs) {
-    if (!log.address) continue;
-    const contractAddress = log.address.toLowerCase();
-    if (seenContracts.has(contractAddress)) continue;
-    seenContracts.add(contractAddress);
-
-    // Try to detect free-mint function on this contract
-    const found = await findFreeMintFunction(contractAddress);
-    if (found) {
-      candidates.push({
-        slug: `chain-${chainKey}`,
-        name: `On-chain mint ${contractAddress.slice(0, 8)}`,
-        contract: contractAddress,
-        functionName: found.functionName,
-        args: found.args,
-        detectedAt: new Date().toISOString(),
-        image_url: null,
-        opensea_url: `https://opensea.io/assets/${chainConfig.openSeaChain}/${contractAddress}`,
-        source: found.source,
-        abiInputs: found.abiInputs,
-        chain: chainKey,
-      });
+    try {
+      erc721Logs = await pc.getLogs({
+        fromBlock,
+        toBlock: latestBlock,
+        topics: [TRANSFER_EVENT_TOPIC, ZERO_ADDRESS_TOPIC],
+      } as any);
+    } catch {
+      // getLogs not supported on this RPC — return empty (Strategy 1/OpenSea will catch mints)
+      return [];
     }
 
-    // Cap at 5 candidates per chain to avoid runaway (was 10, reduced for speed)
-    if (candidates.length >= 5) break;
-  }
+    try {
+      erc1155SingleLogs = await pc.getLogs({
+        fromBlock,
+        toBlock: latestBlock,
+        topics: [ERC1155_TRANSFER_SINGLE_TOPIC, null, ZERO_ADDRESS_TOPIC],
+      } as any);
+    } catch {
+      // ERC-1155 is bonus — continue with ERC-721 only
+    }
 
-  return candidates;
+    // Get unique contract addresses from both event types
+    const seenContracts = new Set<string>();
+    const candidates: MintCandidate[] = [];
+
+    const allLogs: any[] = [...(erc721Logs || []), ...(erc1155SingleLogs || [])];
+
+    for (const log of allLogs) {
+      if (!log.address) continue;
+      const contractAddress = log.address.toLowerCase();
+      if (seenContracts.has(contractAddress)) continue;
+      seenContracts.add(contractAddress);
+
+      const found = await findFreeMintFunction(contractAddress);
+      if (found) {
+        candidates.push({
+          slug: `chain-${chainKey}`,
+          name: `On-chain mint ${contractAddress.slice(0, 8)}`,
+          contract: contractAddress,
+          functionName: found.functionName,
+          args: found.args,
+          detectedAt: new Date().toISOString(),
+          image_url: null,
+          opensea_url: `https://opensea.io/assets/${chainConfig.openSeaChain}/${contractAddress}`,
+          source: found.source,
+          abiInputs: found.abiInputs,
+          chain: chainKey,
+        });
+      }
+
+      if (candidates.length >= 5) break;
+    }
+
+    return candidates;
+  } catch {
+    // Any RPC failure (getBlockNumber, getLogs) → return empty, scan continues via OpenSea
+    return [];
+  }
 }
 
 export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidate[]> {
