@@ -289,6 +289,141 @@ async function executeScanCycle(): Promise<void> {
 }
 
 // ============================================================================
+// HTTP SERVER — exposes local bot status via REST (for remote monitoring)
+// ============================================================================
+
+import http from 'http';
+
+const HTTP_PORT = parseInt(process.env.LOCAL_HTTP_PORT || '8787', 10);
+
+async function startHttpServer(): Promise<void> {
+  const server = http.createServer(async (req, res) => {
+    // CORS headers for cross-origin requests
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url || '/', `http://localhost:${HTTP_PORT}`);
+    const path = url.pathname;
+
+    try {
+      if (path === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          uptime: Math.floor((Date.now() - startTime) / 1000),
+          isScanning,
+        }));
+        return;
+      }
+
+      if (path === '/status') {
+        const stats = getStats();
+        const balances: any = {};
+        for (const chain of SCAN_CHAINS) {
+          balances[chain] = await getSmartAccountBalance(chain);
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          timestamp: new Date().toISOString(),
+          smartAccount: smartAccountAddress,
+          uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+          isScanning,
+          lastScanDurationMs: lastScanDuration,
+          balances,
+          local: {
+            scans: totalScansLocal,
+            mints: totalMintsLocal,
+            success: totalSuccessLocal,
+            failed: totalFailLocal,
+          },
+          global: {
+            scans: stats.totalScans,
+            mints: stats.totalMintsAttempted,
+            success: stats.totalMintsSucceeded,
+            failed: stats.totalMintsFailed,
+          },
+          sources: {
+            openSea: !!process.env.OPENSEA_API_KEY,
+            alchemy: await isAlchemyConfiguredAsync(),
+            supabase: !!process.env.SUPABASE_URL,
+            telegram: !!process.env.TELEGRAM_BOT_TOKEN,
+          },
+          lastCycleResults: lastCycleResults.slice(0, 10).map(r => ({
+            success: r.success,
+            chain: r.candidate?.chain,
+            contract: r.candidate?.contract,
+            name: r.candidate?.name,
+            txHash: r.txHash,
+            error: r.error?.slice(0, 100),
+          })),
+          recentErrors: lastErrors.slice(-5),
+          activityLog: (stats.activityLog || []).slice(0, 10),
+        }, null, 2));
+        return;
+      }
+
+      if (path === '/run' && req.method === 'POST') {
+        // Trigger immediate scan
+        if (isScanning) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Scan already in progress', isScanning: true }));
+          return;
+        }
+        // Trigger async — don't wait for completion
+        executeScanCycle().catch(() => {});
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ message: 'Scan triggered', timestamp: new Date().toISOString() }));
+        return;
+      }
+
+      if (path === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!DOCTYPE html>
+<html>
+<head><title>Local Sniper Bot</title></head>
+<body style="font-family: monospace; padding: 20px;">
+<h1>🤖 Local Sniper Bot</h1>
+<p>Endpoints:</p>
+<ul>
+  <li><a href="/health">/health</a> — basic health check</li>
+  <li><a href="/status">/status</a> — full bot status JSON</li>
+  <li><code>POST /run</code> — trigger immediate scan</li>
+</ul>
+</body>
+</html>`);
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found', path }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+
+  server.listen(HTTP_PORT, () => {
+    console.log(`${c.green}✓ HTTP server on http://localhost:${HTTP_PORT}${c.reset}`);
+    console.log(`${c.dim}  Endpoints: /health /status POST /run${c.reset}`);
+    console.log(`${c.dim}  For remote access: ngrok http ${HTTP_PORT}${c.reset}`);
+  });
+
+  // Graceful shutdown
+  process.on('SIGINT', () => {
+    server.close();
+    process.exit(0);
+  });
+}
+
+// ============================================================================
 // MAIN LOOP
 // ============================================================================
 
@@ -341,6 +476,9 @@ async function main(): Promise<void> {
   console.log(`  Max candidates:  ${MAX_CANDIDATES_PER_SCAN}`);
   console.log(`  Chains:          ${SCAN_CHAINS.join(', ')}`);
   console.log(`\n${c.green}✓ Bot ready. Starting dashboard...${c.reset}\n`);
+
+  // Start HTTP server for remote monitoring (via ngrok)
+  await startHttpServer();
 
   await new Promise(r => setTimeout(r, 2000));
 
