@@ -356,19 +356,107 @@ export async function looksLikeContract(address: string): Promise<boolean> {
 export async function findFreeMintFunction(
   contractAddress: string
 ): Promise<{ functionName: string; args: unknown[]; source: 'basescan' | 'fallback'; abiInputs?: any[] } | null> {
-  // Try Basescan ABI first (catches ALL custom function names)
+  // Strategy 1: Basescan verified ABI
   const basescanResult = await findFreeMintViaBasescanAbi(contractAddress);
   if (basescanResult) {
     return { ...basescanResult, source: 'basescan' };
   }
 
-  // Fallback: hardcoded 60+ candidates
+  // Strategy 2: Hardcoded 100+ signatures
   const fallbackResult = await findFreeMintViaFallback(contractAddress);
   if (fallbackResult) {
     return { ...fallbackResult, source: 'fallback' };
   }
 
+  // Strategy 3: PRICE-AWARE DETECTION (NEW!)
+  // Many NFT contracts have mint() payable but price() == 0 (free phase).
+  // staticCall on payable mint() reverts, but reading price() tells us if it's free.
+  const priceResult = await findFreeMintViaPriceCheck(contractAddress);
+  if (priceResult) {
+    return { ...priceResult, source: 'fallback' };
+  }
+
   return null;
+}
+
+/**
+ * Price-aware free mint detection.
+ * Reads price()/mintPrice()/cost() — if returns 0, mint is currently free.
+ * Then tries staticCall on mint() (payable) — might succeed if no msg.value check.
+ */
+async function findFreeMintViaPriceCheck(
+  contractAddress: string
+): Promise<{ functionName: string; args: unknown[]; abiInputs?: any[] } | null> {
+  try {
+    const { checkMintPrice } = await import('@/lib/price-checker');
+    const priceInfo = await checkMintPrice(contractAddress);
+    if (!priceInfo) return null;
+
+    // Price is 0! Now try to call mint() via staticCall.
+    // The function might be payable but with no msg.value check.
+    const toAddress = process.env.PROCEEDS_ADDRESS || '0x0000000000000000000000000000000000000001';
+
+    const mintFunctions = [
+      { functionName: 'mint', args: [] },
+      { functionName: 'mint', args: [1n] },
+      { functionName: 'mint', args: [toAddress] },
+      { functionName: 'mint', args: [toAddress, 1n] },
+      { functionName: 'publicMint', args: [] },
+      { functionName: 'publicMint', args: [1n] },
+      { functionName: 'claim', args: [] },
+      { functionName: 'claim', args: [1n] },
+      { functionName: 'freeMint', args: [] },
+      { functionName: 'freeMint', args: [1n] },
+    ];
+
+    // Build ABI with BOTH non-payable and payable variants
+    const MINT_ABI_BOTH = parseAbi([
+      'function mint() public',
+      'function mint(uint256 quantity) public',
+      'function mint(address to) public',
+      'function mint(address to, uint256 quantity) public',
+      'function publicMint() public',
+      'function publicMint(uint256 quantity) public',
+      'function claim() public',
+      'function claim(uint256 quantity) public',
+      'function freeMint() public',
+      'function freeMint(uint256 quantity) public',
+      // Also try payable variants — staticCall might work if no msg.value check
+      'function mint() public payable',
+      'function mint(uint256 quantity) public payable',
+      'function mint(address to) public payable',
+      'function publicMint() public payable',
+      'function publicMint(uint256 quantity) public payable',
+      'function claim() public payable',
+      'function freeMint() public payable',
+      'function freeMint(uint256 quantity) public payable',
+    ]);
+
+    const contract = getContract({
+      address: contractAddress as `0x${string}`,
+      abi: MINT_ABI_BOTH,
+      client: publicClient,
+    });
+
+    for (const candidate of mintFunctions) {
+      try {
+        const fn = (contract as any)[candidate.functionName];
+        if (!fn) continue;
+        await fn.read.staticCall(candidate.args);
+        // staticCall succeeded → mint is callable with 0 value!
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+
+    // staticCall failed on all mint functions, BUT price is 0.
+    // The mint might still work — try without staticCall verification.
+    // Return the first mint function as a "best effort" candidate.
+    return { functionName: 'mint', args: [] };
+  } catch {
+    return null;
+  }
 }
 
 /**
