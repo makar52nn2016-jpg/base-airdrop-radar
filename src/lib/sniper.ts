@@ -104,31 +104,67 @@ const ATTEMPTED_TTL_MS = 15 * 60 * 1000; // 15 minutes (was 1 hour)
 const NOTIFIED = new Map<string, number>();
 const NOTIFIED_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-// Has ATTEMPTED been loaded from Supabase yet this instance?
+// Has ATTEMPTED been loaded from Supabase/file yet this instance?
 let ATTEMPTED_LOADED = false;
 
+// File path for local file-based ATTEMPTED persistence (fallback when Supabase not configured).
+// Used by local sniper CLI to share state across restarts without Supabase.
+const ATTEMPTED_FILE = process.env.ATTEMPTED_FILE || '.attempted-contracts.json';
+
 /**
- * Loads ATTEMPTED map from Supabase (once per Vercel instance).
+ * Loads ATTEMPTED map from Supabase (or local file as fallback).
  * Prunes entries older than ATTEMPTED_TTL_MS.
- * Best-effort — fails silently if Supabase not configured.
+ * Best-effort — fails silently.
+ *
+ * v3: added file-based fallback. If Supabase is not configured (e.g., local sniper
+ * CLI without SUPABASE_URL), persist ATTEMPTED to local file system. This lets
+ * local bot remember attempted contracts across restarts without needing Supabase.
  */
 async function ensureAttemptedLoaded(): Promise<void> {
   if (ATTEMPTED_LOADED) return;
   ATTEMPTED_LOADED = true;
+
+  // Try Supabase first (works on Vercel + local if configured)
   try {
-    const { loadState } = await import('@/lib/supabase');
-    const persisted = await loadState<{ [k: string]: number }>('attempted_contracts');
-    if (persisted && typeof persisted === 'object') {
-      const now = Date.now();
-      for (const [k, ts] of Object.entries(persisted)) {
-        if (typeof ts === 'number' && now - ts < ATTEMPTED_TTL_MS) {
-          ATTEMPTED.set(k, ts);
+    const { isSupabaseConfigured, loadState } = await import('@/lib/supabase');
+    if (isSupabaseConfigured()) {
+      const persisted = await loadState<{ [k: string]: number }>('attempted_contracts');
+      if (persisted && typeof persisted === 'object') {
+        const now = Date.now();
+        for (const [k, ts] of Object.entries(persisted)) {
+          if (typeof ts === 'number' && now - ts < ATTEMPTED_TTL_MS) {
+            ATTEMPTED.set(k, ts);
+          }
         }
+        logActivity({
+          type: 'chain_scan',
+          message: `Loaded ${ATTEMPTED.size} attempted contracts from Supabase`,
+        });
+        return;
       }
-      logActivity({
-        type: 'chain_scan',
-        message: `Loaded ${ATTEMPTED.size} attempted contracts from Supabase`,
-      });
+    }
+  } catch {
+    // Supabase not available — fall through to file-based
+  }
+
+  // Fallback: load from local file
+  try {
+    const fs = await import('fs/promises');
+    const content = await fs.readFile(ATTEMPTED_FILE, 'utf8').catch(() => null);
+    if (content) {
+      const persisted = JSON.parse(content);
+      if (persisted && typeof persisted === 'object') {
+        const now = Date.now();
+        for (const [k, ts] of Object.entries(persisted)) {
+          if (typeof ts === 'number' && now - ts < ATTEMPTED_TTL_MS) {
+            ATTEMPTED.set(k, ts);
+          }
+        }
+        logActivity({
+          type: 'chain_scan',
+          message: `Loaded ${ATTEMPTED.size} attempted contracts from file (${ATTEMPTED_FILE})`,
+        });
+      }
     }
   } catch {
     // Silent fail — bot still works with empty ATTEMPTED
@@ -136,17 +172,30 @@ async function ensureAttemptedLoaded(): Promise<void> {
 }
 
 /**
- * Saves ATTEMPTED map to Supabase (fire-and-forget).
+ * Saves ATTEMPTED map to Supabase (or local file as fallback).
  * Called after each mint attempt (success or fail).
  */
 async function saveAttempted(): Promise<void> {
+  const obj: { [k: string]: number } = {};
+  for (const [k, ts] of ATTEMPTED.entries()) {
+    obj[k] = ts;
+  }
+
+  // Try Supabase first
   try {
-    const { saveState } = await import('@/lib/supabase');
-    const obj: { [k: string]: number } = {};
-    for (const [k, ts] of ATTEMPTED.entries()) {
-      obj[k] = ts;
+    const { isSupabaseConfigured, saveState } = await import('@/lib/supabase');
+    if (isSupabaseConfigured()) {
+      await saveState('attempted_contracts', obj);
+      return;
     }
-    await saveState('attempted_contracts', obj);
+  } catch {
+    // Supabase failed — fall through to file
+  }
+
+  // Fallback: save to local file
+  try {
+    const fs = await import('fs/promises');
+    await fs.writeFile(ATTEMPTED_FILE, JSON.stringify(obj, null, 2), 'utf8');
   } catch {
     // Silent fail
   }

@@ -55,3 +55,5 @@ server.log
 scripts/cron_secret.txt
 scripts/cron_job_url.txt
 .env.local
+.attempted-contracts.json
+.z-ai-config
