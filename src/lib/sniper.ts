@@ -284,7 +284,9 @@ export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidat
           const { scanRecentContractDeployments } = await import('@/lib/deployment-scanner');
           const deployCandidates = await scanRecentContractDeployments(chainKey, 2);
           return [...chainCandidates, ...deployCandidates];
-        } catch {}
+        } catch (e: any) {
+          logError(`Deploy scan ${chainKey} error: ${e.message?.slice(0, 60)}`);
+        }
       }
 
       return chainCandidates;
