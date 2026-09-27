@@ -614,8 +614,8 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
   // Requires ALCHEMY_API_KEY env var (free tier 25k req/month).
   if (candidates.length < maxCandidates) {
     try {
-      const { scanAlchemyMintsAcrossChains, isAlchemyConfigured } = await import('@/lib/alchemy-scanner');
-      if (isAlchemyConfigured()) {
+      const { scanAlchemyMintsAcrossChains, isAlchemyConfiguredAsync } = await import('@/lib/alchemy-scanner');
+      if (await isAlchemyConfiguredAsync()) {
         // Scan all 3 L2 chains in parallel — get fresh mints from each
         const alchemyContracts = await scanAlchemyMintsAcrossChains(
           ['base', 'optimism', 'arbitrum'],

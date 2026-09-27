@@ -9,6 +9,10 @@
  * Required env var:
  *   - ALCHEMY_API_KEY: from https://dashboard.alchemy.com (free tier 25k NFT API req/month)
  *
+ * v2 — if env var not set, falls back to Supabase runtime config stored via
+ * /api/sniper/config endpoint. Lets user add the key via simple curl call
+ * instead of going through Vercel env vars dashboard.
+ *
  * Free tier limits:
  *   - 300M compute units / month (plenty for sniper use case)
  *   - 25k NFT API REST requests / month
@@ -19,28 +23,59 @@
  *   - https://docs.alchemy.com/reference/getnftsforcompany-collection
  */
 
-const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || '';
+// Cache for runtime-loaded key (avoid loading from Supabase on every call)
+let cachedRuntimeKey: string | null = null;
+let runtimeKeyLoadTime = 0;
+const RUNTIME_KEY_CACHE_TTL = 60 * 1000; // 1 minute
 
-// Alchemy enhanced RPC URLs per chain
-const ALCHEMY_RPC_URLS: Record<string, string> = {
-  base: `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-  optimism: `https://opt-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-  arbitrum: `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-  ethereum: `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-  polygon: `https://polygon-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-};
+/**
+ * Returns the Alchemy API key — tries env var first, then Supabase runtime config.
+ * Supabase fallback lets us add the key without Vercel env vars dashboard setup.
+ */
+async function getAlchemyApiKey(): Promise<string> {
+  // 1. Try env var (set in Vercel env vars)
+  const envKey = process.env.ALCHEMY_API_KEY;
+  if (envKey) return envKey;
 
-// OpenSea chain name → our ChainKey
-const OPENSEA_TO_CHAIN_KEY: Record<string, string> = {
-  base: 'base',
-  optimism: 'optimism',
-  arbitrum: 'arbitrum',
-  matic: 'polygon',
-  ethereum: 'ethereum',
-};
+  // 2. Try cached runtime key (TTL 1 min to avoid hammering Supabase)
+  const now = Date.now();
+  if (cachedRuntimeKey && now - runtimeKeyLoadTime < RUNTIME_KEY_CACHE_TTL) {
+    return cachedRuntimeKey;
+  }
 
+  // 3. Load from Supabase runtime config (stored via /api/sniper/config)
+  try {
+    const { loadState } = await import('@/lib/supabase');
+    const config = (await loadState<Record<string, any>>('runtime_config')) || {};
+    const runtimeKey = config.alchemy_api_key as string | undefined;
+    if (runtimeKey) {
+      cachedRuntimeKey = runtimeKey;
+      runtimeKeyLoadTime = now;
+      return runtimeKey;
+    }
+  } catch {
+    // Silent fail
+  }
+
+  return '';
+}
+
+/**
+ * Synchronously checks if Alchemy is configured via env var.
+ * For runtime (Supabase) key, use isAlchemyConfiguredAsync() instead.
+ */
 export function isAlchemyConfigured(): boolean {
-  return !!ALCHEMY_API_KEY;
+  return !!process.env.ALCHEMY_API_KEY || !!cachedRuntimeKey;
+}
+
+/**
+ * Async check — loads key from Supabase if env var not set.
+ * Use this in scanner functions to ensure we have a valid key before scanning.
+ */
+export async function isAlchemyConfiguredAsync(): Promise<boolean> {
+  if (process.env.ALCHEMY_API_KEY) return true;
+  const key = await getAlchemyApiKey();
+  return !!key;
 }
 
 /**
@@ -61,10 +96,11 @@ export async function getRecentMintsViaAlchemy(
   chainKey: string,
   sinceBlocks = 500
 ): Promise<Array<{ contract: string; chain: string; tokenId?: string }>> {
-  if (!isAlchemyConfigured()) return [];
+  const apiKey = await getAlchemyApiKey();
+  if (!apiKey) return [];
 
-  const rpcUrl = ALCHEMY_RPC_URLS[chainKey];
-  if (!rpcUrl) return [];
+  const rpcUrl = `https://${ALCHEMY_HOST_BY_CHAIN[chainKey]}/v2/${apiKey}`;
+  if (!ALCHEMY_HOST_BY_CHAIN[chainKey]) return [];
 
   try {
     // Step 1: Get current block number
@@ -132,6 +168,15 @@ export async function getRecentMintsViaAlchemy(
   }
 }
 
+// Alchemy host per chain (built dynamically with API key)
+const ALCHEMY_HOST_BY_CHAIN: Record<string, string> = {
+  base: 'base-mainnet.g.alchemy.com',
+  optimism: 'opt-mainnet.g.alchemy.com',
+  arbitrum: 'arb-mainnet.g.alchemy.com',
+  ethereum: 'eth-mainnet.g.alchemy.com',
+  polygon: 'polygon-mainnet.g.alchemy.com',
+};
+
 /**
  * Fetches contract metadata from Alchemy NFT API.
  * Returns `isMintable` flag if Alchemy knows about this contract.
@@ -154,12 +199,13 @@ export async function getContractMetadata(
   deployedBlock?: number;
   tokenType?: string;
 } | null> {
-  if (!isAlchemyConfigured()) return null;
+  const apiKey = await getAlchemyApiKey();
+  if (!apiKey) return null;
 
   try {
     const url = `https://nft.alchemy.com/v3/getContractMetadata?chain=${chain}&contractAddress=${contractAddress}`;
     const resp = await fetch(url, {
-      headers: { 'X-Alchemy-API-Key': ALCHEMY_API_KEY },
+      headers: { 'X-Alchemy-API-Key': apiKey },
       cache: 'no-store',
     });
 
@@ -182,12 +228,13 @@ export async function isSpamContract(
   contractAddress: string,
   chain: string
 ): Promise<boolean> {
-  if (!isAlchemyConfigured()) return false;
+  const apiKey = await getAlchemyApiKey();
+  if (!apiKey) return false;
 
   try {
     const url = `https://nft.alchemy.com/v3/isSpamContract?chain=${chain}&contractAddress=${contractAddress}`;
     const resp = await fetch(url, {
-      headers: { 'X-Alchemy-API-Key': ALCHEMY_API_KEY },
+      headers: { 'X-Alchemy-API-Key': apiKey },
       cache: 'no-store',
     });
 
@@ -210,7 +257,8 @@ export async function scanAlchemyMintsAcrossChains(
   chains: string[] = ['base', 'optimism', 'arbitrum'],
   blocksPerChain = 500
 ): Promise<Array<{ contract: string; chain: string; tokenId?: string }>> {
-  if (!isAlchemyConfigured()) return [];
+  const apiKey = await getAlchemyApiKey();
+  if (!apiKey) return [];
 
   // Scan all chains in parallel
   const results = await Promise.all(
@@ -249,7 +297,7 @@ export async function scanAlchemyMintsAcrossChains(
 export async function filterAlchemyContractsByMintability(
   contracts: Array<{ contract: string; chain: string }>
 ): Promise<Array<{ contract: string; chain: string; isMintable?: boolean }>> {
-  if (!isAlchemyConfigured() || contracts.length === 0) return contracts;
+  if (!(await isAlchemyConfiguredAsync()) || contracts.length === 0) return contracts;
 
   const results: Array<{ contract: string; chain: string; isMintable?: boolean }> = [];
 
