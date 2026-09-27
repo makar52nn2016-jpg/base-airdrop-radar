@@ -35,10 +35,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    // Reduced from 2 to 1 — with cron-job.org pinging every 1 minute,
-    // 1 mint per cycle is enough (and avoids rate-limits on Vercel 60s timeout).
-    // Total: ~60 mints/hour max if every scan finds candidates.
-    const result = await runSniperCycle(1);
+    // v2: increased from 1 to 3 — now that Smart Account has ETH on Base,
+    // Optimism, AND Arbitrum, bot can attempt mints on 3 chains per cycle.
+    // Vercel 60s timeout is enough for 3 sequential mint attempts (each ~10-15s).
+    const result = await runSniperCycle(3);
     return NextResponse.json({
       success: true,
       timestamp: new Date().toISOString(),

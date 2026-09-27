@@ -90,12 +90,16 @@ const MAX_LOG_SIZE = 100;
 // v2 — now persisted to Supabase on every write so it survives Vercel cold starts.
 // Without this, every scan after instance recycling would re-notify the SAME
 // 6 OpenSea contracts in TG — exactly the spam user was complaining about.
-// TTL: 1 hour (entries older than that get pruned, allow retry).
+// v3 — TTL reduced from 1 hour to 15 minutes — allows more frequent retries
+// since user reported bot was idle (all candidates in 6h OpenSea window were
+// already attempted). With 15min TTL, contracts become re-eligible for retry
+// 4x faster. Pimlico simulation reverts are FREE (no gas spent), so retrying
+// more often doesn't cost ETH.
 const ATTEMPTED = new Map<string, number>(); // key = `${chain}:${contract}`, value = unix ms
-const ATTEMPTED_TTL_MS = 60 * 60 * 1000; // 1 hour
+const ATTEMPTED_TTL_MS = 15 * 60 * 1000; // 15 minutes (was 1 hour)
 
 // TG notification cooldown — separate from ATTEMPTED (which blocks mint retry).
-// Even if we re-attempt a mint after 1h TTL, we don't spam TG about the same
+// Even if we re-attempt a mint after 15min TTL, we don't spam TG about the same
 // contract more than once per hour. Track per-contract last-notified timestamp.
 const NOTIFIED = new Map<string, number>();
 const NOTIFIED_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -466,7 +470,7 @@ async function scanRecentMintsViaLogs(
   }
 }
 
-export async function scanForFreeMints(maxCandidates = 10): Promise<MintCandidate[]> {
+export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidate[]> {
   logScanStart();
 
   // CRITICAL: load attempted contracts from Supabase before scanning.
