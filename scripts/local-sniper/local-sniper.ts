@@ -39,6 +39,7 @@ import { runSniperCycle, getSmartAccountAddress } from '@/lib/sniper';
 import { getStats } from '@/lib/stats';
 import { getClientsForChain, type ChainKey } from '@/lib/pimlico';
 import { isAlchemyConfiguredAsync } from '@/lib/alchemy-scanner';
+import { notifyProfit, classifyCandidate } from './profit-alert';
 
 // ============================================================================
 // CONFIGURATION — MAXIMUM OVERDRIVE v4 (500% power, 3 chains focus)
@@ -258,31 +259,95 @@ async function executeScanCycle(): Promise<void> {
 
   try {
     totalScansLocal++;
-    // Override runSniperCycle's default maxMints via env hack (runSniperCycle reads from arg)
     const result = await runSniperCycle(MAX_MINTS_PER_CYCLE);
 
     lastCycleResults = result.results || [];
     totalMintsLocal += result.results.length;
 
     for (const r of result.results) {
+      const candidate = r.candidate || {};
+      
       if (r.success) {
         totalSuccessLocal++;
-        // SUCCESS! Print highlighted
+        // 🔥 SUCCESS! Open profit alert window
+        notifyProfit({
+          type: 'success',
+          title: `MINT SUCCEEDED! ${candidate.name || 'Unknown'}`,
+          collectionName: candidate.name || 'Unknown',
+          chain: candidate.chain || 'base',
+          contract: candidate.contract || '',
+          functionName: candidate.functionName,
+          txHash: r.txHash,
+          buyPriceEth: candidate.value ? Number(candidate.value) / 1e18 : 0,
+          floorPriceEth: candidate.floorPrice || null,
+          expectedProfitEth: candidate.floorPrice ? (candidate.floorPrice * 0.95) - (candidate.value ? Number(candidate.value) / 1e18 : 0) : null,
+          expectedProfitUsd: candidate.floorPrice ? ((candidate.floorPrice * 0.95) - (candidate.value ? Number(candidate.value) / 1e18 : 0)) * 3000 : null,
+          openseaUrl: candidate.opensea_url || `https://opensea.io/assets/${candidate.chain}/${candidate.contract}`,
+          basescanUrl: `https://${(candidate.chain || 'base')}scan.org/address/${candidate.contract}`,
+        });
+        
+        // Also print to main console
         console.log(`\n${c.green}${c.bold}🎉🎉🎉 MINT SUCCEEDED!${c.reset}`);
-        console.log(`${c.green}  Collection: ${r.candidate?.name}${c.reset}`);
-        console.log(`${c.green}  Chain:      ${r.candidate?.chain}${c.reset}`);
-        console.log(`${c.green}  Contract:   ${r.candidate?.contract}${c.reset}`);
-        console.log(`${c.green}  Tx:         ${r.txHash}${c.reset}`);
-        console.log(`${c.green}  OpenSea:    https://opensea.io/assets/${r.candidate?.chain}/${r.candidate?.contract}${c.reset}`);
-        console.log(`${c.green}  Smart Acct: ${r.smartAccountAddress}${c.reset}\n`);
+        console.log(`${c.green}  Collection: ${candidate.name}${c.reset}`);
+        console.log(`${c.green}  Chain:      ${candidate.chain}${c.reset}`);
+        console.log(`${c.green}  Tx:         ${r.txHash}${c.reset}\n`);
       } else {
         totalFailLocal++;
-        // Track unexpected errors (не paid reverts)
+        
+        // Check if this was a "profit opportunity" that failed (still worth alerting)
+        const profitType = classifyCandidate(candidate);
+        if (profitType && (profitType === 'cheap_mint' || profitType === 'flip' || profitType === 'free_mint')) {
+          // This was a profit opportunity that we attempted — alert user!
+          notifyProfit({
+            type: profitType as any,
+            title: `${profitType.toUpperCase()} OPPORTUNITY — ${candidate.name || 'Unknown'}`,
+            collectionName: candidate.name || 'Unknown',
+            chain: candidate.chain || 'base',
+            contract: candidate.contract || '',
+            functionName: candidate.functionName,
+            buyPriceEth: candidate.value ? Number(candidate.value) / 1e18 : 0,
+            floorPriceEth: candidate.floorPrice || null,
+            expectedProfitEth: candidate.floorPrice ? (candidate.floorPrice * 0.95) - (candidate.value ? Number(candidate.value) / 1e18 : 0) : null,
+            expectedProfitUsd: candidate.floorPrice ? ((candidate.floorPrice * 0.95) - (candidate.value ? Number(candidate.value) / 1e18 : 0)) * 3000 : null,
+            openseaUrl: candidate.opensea_url || `https://opensea.io/assets/${candidate.chain}/${candidate.contract}`,
+            basescanUrl: `https://${(candidate.chain || 'base')}scan.org/address/${candidate.contract}`,
+            notes: `Mint attempt failed: ${(r.error || '').slice(0, 80)}`,
+          });
+        }
+        
+        // Track unexpected errors
         const err = r.error || '';
         if (!err.includes('reverted') && !err.includes('Insufficient') && !err.includes('All')) {
           lastErrors.push(`${new Date().toISOString().slice(11, 19)} ${err.slice(0, 60)}`);
           if (lastErrors.length > 20) lastErrors.shift();
         }
+      }
+    }
+    
+    // Also check candidates BEFORE mint attempt — alert about profit opportunities
+    for (const candidate of (result.candidates || [])) {
+      const profitType = classifyCandidate(candidate);
+      if (profitType && (profitType === 'cheap_mint' || profitType === 'flip')) {
+        // Found a profit opportunity! Alert before mint.
+        const buyPrice = candidate.value ? Number(candidate.value) / 1e18 : 0;
+        const floor = candidate.floorPrice || 0;
+        const profit = floor > 0 ? (floor * 0.95 - buyPrice) : 0;
+        
+        notifyProfit({
+          type: profitType as any,
+          title: `${profitType === 'flip' ? 'FLIP' : 'CHEAP MINT'} OPPORTUNITY FOUND!`,
+          collectionName: candidate.name || 'Unknown',
+          chain: candidate.chain || 'base',
+          contract: candidate.contract || '',
+          functionName: candidate.functionName,
+          buyPriceEth: buyPrice,
+          floorPriceEth: floor || null,
+          expectedProfitEth: profit || null,
+          expectedProfitUsd: profit ? profit * 3000 : null,
+          openseaUrl: candidate.opensea_url || `https://opensea.io/assets/${candidate.chain}/${candidate.contract}`,
+          basescanUrl: `https://${(candidate.chain || 'base')}scan.org/address/${candidate.contract}`,
+          notes: 'Bot is attempting to mint/buy this NFT right now.',
+        });
       }
     }
   } catch (e: any) {

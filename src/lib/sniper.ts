@@ -107,7 +107,7 @@ const MAX_LOG_SIZE = 100;
 // 33 min uptime, all early contracts had expired TTL → being retried.
 // 1 hour TTL = no repeats for 1 hour after first attempt.
 const ATTEMPTED = new Map<string, number>(); // key = `${chain}:${contract}`, value = unix ms
-const ATTEMPTED_TTL_MS = 15 * 60 * 1000; // 15 min (FRESH strategy — retry sooner for newly opened mints)
+const ATTEMPTED_TTL_MS = 60 * 60 * 1000; // 1 hour (v5: increased back — 15min was too aggressive, caused repeated retries)
 
 // TG notification cooldown — separate from ATTEMPTED (which blocks mint retry).
 // Even if we re-attempt a mint after 15min TTL, we don't spam TG about the same
