@@ -132,31 +132,55 @@ function truncate(str: string, len: number): string {
 }
 
 // ============================================================================
-// DASHBOARD RENDER
+// DASHBOARD — SCROLLING LOG (не статический, а живой лог)
 // ============================================================================
 
-async function renderDashboard(isScanning: boolean): Promise<void> {
-  clearScreen();
+let lastStatusLineTime = 0;
+const STATUS_INTERVAL_MS = 30_000; // Print compact status every 30 sec
 
-  // ─── HEADER ───────────────────────────────────────────────────────────────
+/**
+ * Prints a compact status line (every 30 sec — not every 500ms).
+ * New events scroll naturally — no screen clearing!
+ */
+async function printStatusLine(isScanning: boolean): Promise<void> {
+  const now = Date.now();
+  if (now - lastStatusLineTime < STATUS_INTERVAL_MS && !isScanning) return;
+  lastStatusLineTime = now;
+
+  const uptime = Math.floor((now - startTime) / 1000);
+  const time = new Date().toLocaleTimeString();
+  const status = isScanning
+    ? `${c.yellow}● SCANNING${c.reset}`
+    : `${c.green}● IDLE${c.reset}`;
+
+  // Compact one-liner status
+  console.log(`${c.dim}[${time}]${c.reset} ${status} ${c.dim}| up:${formatETA(uptime)} | scans:${totalScansLocal} | mints:${totalMintsLocal} | ✓${c.green}${totalSuccessLocal}${c.reset}${c.dim} ✗${c.red}${totalFailLocal}${c.reset}${c.dim} | next: ${lastCycleResults.length === 0 ? '15s' : '3s'}${c.reset}`);
+}
+
+/**
+ * Prints a new event to the scrolling log (with timestamp + color).
+ */
+function logEvent(type: string, message: string, color: string = c.reset): void {
+  const time = new Date().toLocaleTimeString();
+  const typeTag = `${c.dim}[${time}]${c.reset} ${color}${type.padEnd(12)}${c.reset}`;
+  console.log(`${typeTag} ${color}${message}${c.reset}`);
+}
+
+/**
+ * Prints the header once at startup.
+ */
+function printHeader(smartAccount: string): void {
   console.log(`${c.bold}${c.cyan}`);
   console.log('  ╔══════════════════════════════════════════════════════════════╗');
-  console.log('  ║         🤖 LOCAL SNIPER BOT — HIGH POWER MODE                ║');
+  console.log('  ║         🤖 LOCAL SNIPER BOT — SCROLLING LOG MODE             ║');
   console.log('  ╚══════════════════════════════════════════════════════════════╝');
-  console.log(c.reset);
-
-  // ─── STATUS LINE ─────────────────────────────────────────────────────────
-  const now = new Date();
-  const uptime = Math.floor((Date.now() - startTime) / 1000);
-  const status = isScanning
-    ? `${c.yellow}${c.bold}● SCANNING${c.reset} ${c.dim}(last: ${lastScanDuration}ms)${c.reset}`
-    : `${c.green}${c.bold}● IDLE${c.reset}`;
-  console.log(`  ${c.dim}Time:${c.reset}   ${now.toLocaleString()}`);
-  console.log(`  ${c.dim}Uptime:${c.reset} ${formatETA(uptime)}`);
-  console.log(`  ${c.dim}Status:${c.reset} ${status}`);
+  console.log(`${c.reset}`);
+  console.log(`${c.dim}  Smart Account: ${c.reset}${c.cyan}${smartAccount}${c.reset}`);
+  console.log(`${c.dim}  Config: maxCandidates=300 maxMints=100 chains=[base, optimism, arbitrum]${c.reset}`);
+  console.log(`${c.dim}  Strategies: OpenSea + Alchemy + Social + Whale + Flip + Cheap + DeFi${c.reset}`);
+  console.log(`${c.dim}  ────────────────────────────────────────────────────────────${c.reset}`);
   console.log();
-
-  // ─── SMART ACCOUNT ──────────────────────────────────────────────────────
+}
   if (smartAccountAddress) {
     console.log(`  ${c.bold}Smart Account:${c.reset} ${c.cyan}${smartAccountAddress}${c.reset}`);
     console.log();
