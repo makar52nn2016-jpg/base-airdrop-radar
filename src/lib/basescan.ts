@@ -435,42 +435,28 @@ export async function findFreeMintFunction(
   }
 
   // Strategy 4: CHEAP MINT detection — contract has a payable mint with price < $0.5
-  // This lets bot mint cheap NFTs that can be flipped for profit on OpenSea.
-  // ALSO check floor price — only mint if floor ≥ $1 (so we can sell for profit).
   const mintPrice = await getContractMintPrice(contractAddress);
   if (mintPrice && mintPrice > 0n && mintPrice <= MAX_CHEAP_MINT_PRICE) {
-    // Check OpenSea floor price — must be at least 2x mint price for profit
-    // (mint price + OpenSea fees 2.5% + gas for listing)
-    const minSellPriceWei = mintPrice * 3n; // 3x mint price = profit target
+    const minSellPriceWei = mintPrice * 3n;
     const floorPrice = await getOpenSeaFloorPrice(contractAddress);
 
     if (floorPrice !== null && floorPrice >= minSellPriceWei) {
-      // Cheap mint with profitable floor — MINT IT!
-      return {
-        functionName: 'mint',
-        args: [],
-        source: 'cheap' as const,
-        value: mintPrice,
-      };
+      return { functionName: 'mint', args: [], source: 'cheap' as const, value: mintPrice };
     } else if (floorPrice !== null && floorPrice < minSellPriceWei) {
-      // Floor price too low — can't sell for profit, skip
-      return null;
+      return null; // Floor too low, not profitable
     }
-    // If floorPrice is null (unknown), still try mint — risky but may work
-    return {
-      functionName: 'mint',
-      args: [],
-      source: 'cheap' as const,
-      value: mintPrice,
-    };
+    return { functionName: 'mint', args: [], source: 'cheap' as const, value: mintPrice };
   }
 
-  // v5: REMOVED BLIND MINT FALLBACK.
-  // Was returning {functionName: 'mint', source: 'blind'} as last resort.
-  // This caused 663 guaranteed reverts in 6 hours — ALL L2 contracts are paid,
-  // so blind mint (msg.value=0) ALWAYS reverts. Wasted time + CPU.
-  // Now returns null → contract won't be added as candidate → no mint attempt.
-  // Only VERIFIED free/cheap mints will be attempted.
+  // Strategy 5: SMART BLIND MINT — only if price() function DOESN'T EXIST on contract.
+  // If price() returned null (function not found) → contract MIGHT be free (no price check).
+  // If price() returned > 0 → contract is CONFIRMED PAID → we already skipped above.
+  // So if we reach here with mintPrice === null → no price function → try blind mint.
+  if (mintPrice === null) {
+    return { functionName: 'mint', args: [], source: 'blind' as const };
+  }
+
+  // mintPrice > MAX_CHEAP_MINT_PRICE → too expensive, skip
   return null;
 }
 
