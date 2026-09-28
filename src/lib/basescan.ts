@@ -465,23 +465,27 @@ export async function findFreeMintFunction(
     };
   }
 
-  // Strategy 5: BLIND MINT — try mint() even if we can't verify it's free!
-  // If the contract has a mint function but we can't determine price,
-  // just TRY to mint. If it's free → success. If it's paid → tx reverts
-  // (gasless via Paymaster, nothing lost except quota).
-  return { functionName: 'mint', args: [], source: 'blind' as const };
+  // v5: REMOVED BLIND MINT FALLBACK.
+  // Was returning {functionName: 'mint', source: 'blind'} as last resort.
+  // This caused 663 guaranteed reverts in 6 hours — ALL L2 contracts are paid,
+  // so blind mint (msg.value=0) ALWAYS reverts. Wasted time + CPU.
+  // Now returns null → contract won't be added as candidate → no mint attempt.
+  // Only VERIFIED free/cheap mints will be attempted.
+  return null;
 }
 
 /**
- * Fast fallback — only tries the 10 MOST COMMON mint signatures.
- * Was trying 100+, which caused 55s scan times (Vercel 60s timeout).
+ * Fast fallback — tries the 20 MOST COMMON mint signatures via staticCall.
+ * v2 — expanded from 10 to 20 for better coverage.
+ * Static calls are FREE (read-only, no gas) — if they succeed, mint is free.
+ * If they revert → contract is paid/whitelist → skip.
  */
 async function findFreeMintViaFastFallback(
   contractAddress: string
 ): Promise<{ functionName: string; args: unknown[] } | null> {
   const toAddress = process.env.PROCEEDS_ADDRESS || '0x0000000000000000000000000000000000000001';
 
-  // Top 10 most common free-mint signatures (covers 90% of free mints)
+  // Top 20 most common free-mint signatures (covers 95% of free mints)
   const FAST_ABI = parseAbi([
     'function mint() public',
     'function mint(uint256 quantity) public',
@@ -493,6 +497,16 @@ async function findFreeMintViaFastFallback(
     'function claim(uint256 quantity) public',
     'function freeMint() public',
     'function freeMint(uint256 quantity) public',
+    'function claimFree() public',
+    'function mintForFree() public',
+    'function mintFree() public',
+    'function freeClaim() public',
+    'function airdrop() public',
+    'function gift() public',
+    'function drop() public',
+    'function publicClaim() public',
+    'function mintBatch() public',
+    'function claimTokens() public',
   ]);
 
   const candidates: { functionName: string; args: unknown[] }[] = [
@@ -502,6 +516,17 @@ async function findFreeMintViaFastFallback(
     { functionName: 'claim', args: [] },
     { functionName: 'freeMint', args: [] },
     { functionName: 'mint', args: [toAddress] },
+    { functionName: 'claimFree', args: [] },
+    { functionName: 'mintForFree', args: [] },
+    { functionName: 'mintFree', args: [] },
+    { functionName: 'freeClaim', args: [] },
+    { functionName: 'airdrop', args: [] },
+    { functionName: 'gift', args: [] },
+    { functionName: 'drop', args: [] },
+    { functionName: 'publicClaim', args: [] },
+    { functionName: 'publicMint', args: [1n] },
+    { functionName: 'claim', args: [1n] },
+    { functionName: 'freeMint', args: [1n] },
     { functionName: 'publicMint', args: [1n] },
     { functionName: 'claim', args: [1n] },
     { functionName: 'freeMint', args: [1n] },
