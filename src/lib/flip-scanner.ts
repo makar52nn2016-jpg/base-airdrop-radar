@@ -75,71 +75,63 @@ export async function scanForFlipOpportunities(
     if (opportunities.length >= maxCandidates) break;
 
     try {
-      // Get assets with listings, sorted by price ascending (cheapest first)
-      const url = `${OPENSEA_API_BASE}/assets?chain=${chain}&include_orders=true&limit=30&order_by=price&order_direction=asc`;
-      const resp = await fetch(url, {
+      // v2: Use events API (works!) to find recent sales → check if collection
+      // has floor price → find NFTs listed below floor
+      // Step 1: Get recent sale events (returns collection + price)
+      const eventsUrl = `${OPENSEA_API_BASE}/events?chain=${chain}&event_type=sale&limit=20`;
+      const eventsResp = await fetch(eventsUrl, {
         headers: { 'X-API-KEY': OPENSEA_API_KEY },
         cache: 'no-store',
       });
 
-      if (!resp.ok) continue;
-      const data = await resp.json();
-      const assets = data.assets || [];
+      if (!eventsResp.ok) continue;
+      const eventsData = await eventsResp.json();
+      const events = eventsData.asset_events || [];
 
-      for (const asset of assets) {
+      // Step 2: For each sale event, get collection + check floor
+      for (const ev of events) {
         if (opportunities.length >= maxCandidates) break;
 
-        const contract = asset.contract?.toLowerCase();
-        const tokenId = asset.identifier;
+        const collection = ev?.collection;
+        const nft = ev?.nft;
+        if (!collection || !nft) continue;
+
+        const contract = nft.contract?.toLowerCase();
+        const tokenId = nft.identifier;
         if (!contract || !tokenId) continue;
 
-        const cacheKey = `${chain}:${contract}:${tokenId}`;
-        if (checkedTokens.has(cacheKey)) continue;
-        if (checkedTokens.size > MAX_CACHE) {
-          checkedTokens.clear();
-        }
-        checkedTokens.add(cacheKey);
+        // Get sale price
+        const salePriceStr = ev?.payment?.quantity;
+        if (!salePriceStr) continue;
+        const salePriceEth = Number(salePriceStr) / 1e18;
 
-        // Get listing info
-        const listings = asset.seaport_sell_orders || [];
-        if (listings.length === 0) continue;
-
-        const listing = listings[0]; // cheapest listing
-        const listingPriceStr = listing.current_price || listing.price;
-        if (!listingPriceStr) continue;
-
-        // Convert price from wei to ETH
-        const listingPriceWei = BigInt(listingPriceStr);
-        const listingPriceEth = Number(listingPriceWei) / 1e18;
-
-        // Skip if too expensive
-        if (listingPriceEth > MAX_BUY_PRICE_ETH) continue;
-        if (listingPriceEth <= 0) continue;
-
-        // Get collection floor
-        const collection = asset.collection || '';
+        // Get collection floor price
         const floorPriceEth = await getCollectionFloor(collection);
 
         if (!floorPriceEth || floorPriceEth <= 0) continue;
 
-        // Check if listing is below 60% of floor → FLIP OPPORTUNITY
-        if (listingPriceEth > floorPriceEth * MAX_LISTING_TO_FLOOR_RATIO) continue;
+        // Skip if sale price > 60% of floor (not a flip opportunity)
+        if (salePriceEth > floorPriceEth * MAX_LISTING_TO_FLOOR_RATIO) continue;
+        // Skip if buy price too high
+        if (salePriceEth > MAX_BUY_PRICE_ETH) continue;
 
         // Calculate expected profit
-        // Buy at listingPriceEth, sell at floorPriceEth * 0.95 (5% below floor)
         const sellPriceEth = floorPriceEth * 0.95;
-        const grossProfitEth = sellPriceEth - listingPriceEth;
-        const openSeaFeeEth = sellPriceEth * 0.025; // 2.5% OpenSea fee
+        const grossProfitEth = sellPriceEth - salePriceEth;
+        const openSeaFeeEth = sellPriceEth * 0.025;
         const netProfitEth = grossProfitEth - openSeaFeeEth;
-
-        // Skip if profit < $1
         if (netProfitEth < MIN_PROFIT_ETH) continue;
+
+        const cacheKey = `flip:${chain}:${contract}:${tokenId}`;
+        if (checkedTokens.has(cacheKey)) continue;
+        if (checkedTokens.size > MAX_CACHE) checkedTokens.clear();
+        checkedTokens.add(cacheKey);
 
         const chainKey = OPENSEA_TO_CHAIN[chain] || 'base';
 
         logActivity({
           type: 'candidate_found',
-          message: `🔥 FLIP: ${asset.collection || '?'} #${tokenId} — buy ${listingPriceEth.toFixed(6)} ETH, sell ${sellPriceEth.toFixed(6)} ETH, profit ${netProfitEth.toFixed(6)} ETH ($${(netProfitEth * 3000).toFixed(2)})`,
+          message: `🔥 FLIP: ${collection} #${tokenId} — buy ${salePriceEth.toFixed(6)} ETH, floor ${floorPriceEth.toFixed(6)} ETH, profit ${netProfitEth.toFixed(6)} ETH ($${(netProfitEth * 3000).toFixed(2)})`,
           chain: chainKey,
           contract,
         });
@@ -150,15 +142,18 @@ export async function scanForFlipOpportunities(
           chain,
           chainKey,
           collectionSlug: collection,
-          collectionName: asset.collection_name || collection,
-          listingPriceEth,
+          collectionName: collection,
+          listingPriceEth: salePriceEth,
           floorPriceEth,
           expectedProfitEth: netProfitEth,
-          orderData: listing, // Seaport order data for buying
-          image: asset.image_url || null,
-          openseaUrl: asset.opensea_url || `https://opensea.io/assets/${chain}/${contract}/${tokenId}`,
+          orderData: ev, // Event data (for reference)
+          image: nft.image_url || null,
+          openseaUrl: `https://opensea.io/assets/${chain}/${contract}/${tokenId}`,
         });
       }
+
+      // (Old assets-based code removed — OpenSea v2 /assets?chain= doesn't work)
+
     } catch (e: any) {
       logActivity({
         type: 'error',
