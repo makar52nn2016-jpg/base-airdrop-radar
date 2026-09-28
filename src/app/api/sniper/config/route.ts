@@ -57,6 +57,14 @@ export async function POST(request: Request) {
       updates.alchemy_api_key = key;
     }
 
+    // v2: Accept any additional config keys (z_ai_config, etc.)
+    for (const [key, value] of Object.entries(body)) {
+      if (key === 'alchemy_api_key') continue; // already handled above
+      if (typeof value === 'string' || typeof value === 'object') {
+        updates[key] = value;
+      }
+    }
+
     if (Object.keys(updates).length === 0) {
       return NextResponse.json(
         { success: false, error: 'No config fields provided. Send {alchemy_api_key: "alch_..."}' },

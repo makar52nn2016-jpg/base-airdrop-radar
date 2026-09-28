@@ -147,20 +147,64 @@ export async function scanSocialMediaForMints(
 }
 
 /**
+ * Ensures .z-ai-config file exists. If not, tries to load from Supabase.
+ * v2: checks Supabase runtime_config for z_ai_config and writes to process.cwd()
+ */
+async function ensureZaiConfig(): Promise<void> {
+  const fs = await import('fs/promises');
+  const path = await import('path');
+  const cwd = process.cwd();
+  const configPath = path.join(cwd, '.z-ai-config');
+
+  // Check if file already exists
+  try {
+    await fs.access(configPath);
+    return; // File exists, SDK will find it
+  } catch {}
+
+  // Try to load from Supabase runtime_config
+  try {
+    const { loadState } = await import('@/lib/supabase');
+    const config = (await loadState<Record<string, any>>('runtime_config')) || {};
+    if (config.z_ai_config) {
+      const configStr = typeof config.z_ai_config === 'string'
+        ? config.z_ai_config
+        : JSON.stringify(config.z_ai_config);
+      await fs.writeFile(configPath, configStr, 'utf8');
+      logActivity({
+        type: 'scan_start',
+        message: 'Social scanner: loaded z-ai config from Supabase, wrote to .z-ai-config',
+      });
+    }
+  } catch {}
+}
+
+/**
  * Wrapper for z-ai web_search function.
  * Uses the z-ai-web-dev-sdk to search the web.
+ * v2: ensures .z-ai-config exists before creating SDK instance.
  */
 async function searchWeb(query: string, num: number = 10): Promise<any[]> {
   try {
+    // Ensure config file exists (loads from Supabase if missing)
+    await ensureZaiConfig();
+
     const ZAI = (await import('z-ai-web-dev-sdk')).default;
     const zai = await ZAI.create();
     const results = await zai.functions.invoke('web_search', { query, num });
     return Array.isArray(results) ? results : [];
   } catch (e: any) {
-    console.error('[social-scanner] web_search error:', e?.message?.slice(0, 100));
+    // Only log error once per session to avoid spam
+    if (!socialScanErrorLogged) {
+      socialScanErrorLogged = true;
+      console.error('[social-scanner] web_search error:', e?.message?.slice(0, 100));
+    }
     return [];
   }
 }
+
+// Track if social scanner error was already logged
+let socialScanErrorLogged = false;
 
 /**
  * Clears the address cache (called periodically to allow re-checking).
