@@ -34,8 +34,13 @@ export const SMART_ACCOUNT = '0x53dbe1b36BA3BEAC6cEf6cD22AD50E362DBcB23A';
 export const BASE_CHAIN_ID = 8453;
 
 export const PROFIT_CONFIG = {
-  minArbitrageProfitEth: 0.000333,
-  maxArbitrageGasEth: 0.000050,
-  minLiquidationProfitEth: 0.000500,
-  maxCheapMintPriceEth: 0.000166,
+  // ARCHITECTURE (per user feedback 2026-09-28):
+  // NO automatic execution. Bot only SCANS + ALERTS.
+  // User executes manually via Aerodrome/Uniswap/Aave UI when profit is real.
+  // Rationale: with $50 budget, cannot beat MEV bots in public mempool.
+  minArbitrageProfitUsd: 5,        // alert when profit > $5 (after fees+gas)
+  minArbitrageSpreadPct: 0.5,      // alert when net spread > 0.5%
+  maxArbitrageGasUsd: 0.05,        // ignore opportunities needing > $0.05 gas
+  minLiquidationProfitUsd: 50,     // alert when liquidation profit > $50
+  maxCheapMintPriceEth: 0.000166, // legacy — NFT sniping
 } as const;
