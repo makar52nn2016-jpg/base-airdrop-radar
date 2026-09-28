@@ -335,7 +335,6 @@ async function executeScanCycle(): Promise<void> {
         }
         
         // Track unexpected errors
-        const err = r.error || '';
         if (!err.includes('reverted') && !err.includes('Insufficient') && !err.includes('All')) {
           lastErrors.push(`${new Date().toISOString().slice(11, 19)} ${err.slice(0, 60)}`);
           if (lastErrors.length > 20) lastErrors.shift();
