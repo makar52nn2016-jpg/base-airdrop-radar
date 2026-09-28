@@ -87,11 +87,10 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   },
 };
 
-// All 5 chains now active (was 3). Polygon + Ethereum added for wider coverage.
-// Polygon uses ETH for gas (since Polygon migrated to ETH).
-// Ethereum mainnet gas is expensive — bot will skip Ethereum mints unless
-// Smart Account has > 0.00005 ETH on Ethereum.
-export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum', 'polygon', 'ethereum'];
+// v5: reverted back to 3 chains. User doesn't have ETH on polygon/ethereum,
+// so scanning them is wasteful (all candidates skip due to balance check).
+// OpenSea + Alchemy strategies still scan ALL chains via events API.
+export const ALL_CHAINS: ChainKey[] = ['base', 'optimism', 'arbitrum'];
 
 // Cache clients per chain (creating clients is expensive)
 const clientCache = new Map<ChainKey, { publicClient: any; bundlerClient: any; paymasterClient: any }>();
