@@ -448,11 +448,13 @@ export async function findFreeMintFunction(
     return { functionName: 'mint', args: [], source: 'cheap' as const, value: mintPrice };
   }
 
-  // Strategy 5: SMART BLIND MINT — only if price() function DOESN'T EXIST on contract.
-  // If price() returned null (function not found) → contract MIGHT be free (no price check).
-  // If price() returned > 0 → contract is CONFIRMED PAID → we already skipped above.
-  // So if we reach here with mintPrice === null → no price function → try blind mint.
-  if (mintPrice === null) {
+  // Strategy 5: SMART BLIND MINT
+  // Try blind mint if:
+  //   - price() doesn't exist on contract (null) → might be free (no price check)
+  //   - price() = 0 → confirmed FREE but static call failed (require checks, etc)
+  // Skip if:
+  //   - price() > $0.5 → confirmed PAID → skip (already handled above)
+  if (mintPrice === null || mintPrice === 0n) {
     return { functionName: 'mint', args: [], source: 'blind' as const };
   }
 
