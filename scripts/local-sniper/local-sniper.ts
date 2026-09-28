@@ -259,16 +259,30 @@ async function executeScanCycle(): Promise<void> {
 
   try {
     totalScansLocal++;
+    logEvent('SCAN', `Scan #${totalScansLocal} started`, c.cyan);
+    
     const result = await runSniperCycle(MAX_MINTS_PER_CYCLE);
+    const scanMs = Date.now() - scanStart;
 
     lastCycleResults = result.results || [];
     totalMintsLocal += result.results.length;
 
+    // Log scan result
+    const candidatesFound = (result.candidates || []).length;
+    const mintsAttempted = result.results.length;
+    logEvent('SCAN', `Complete: ${candidatesFound} candidates, ${mintsAttempted} mints (${scanMs}ms)`, c.cyan);
+
     for (const r of result.results) {
       const candidate = r.candidate || {};
+      const chain = candidate.chain || 'base';
+      const contract = (candidate.contract || '').slice(0, 10);
+      const name = (candidate.name || '').slice(0, 25);
+      const source = candidate.source || '?';
       
       if (r.success) {
         totalSuccessLocal++;
+        logEvent('SUCCESS', `✅ ${name} [${chain}] ${contract} tx=${(r.txHash || '').slice(0, 18)}`, c.green + c.bold);
+        
         // 🔥 SUCCESS! Open profit alert window
         notifyProfit({
           type: 'success',
@@ -285,19 +299,24 @@ async function executeScanCycle(): Promise<void> {
           openseaUrl: candidate.opensea_url || `https://opensea.io/assets/${candidate.chain}/${candidate.contract}`,
           basescanUrl: `https://${(candidate.chain || 'base')}scan.org/address/${candidate.contract}`,
         });
-        
-        // Also print to main console
-        console.log(`\n${c.green}${c.bold}🎉🎉🎉 MINT SUCCEEDED!${c.reset}`);
-        console.log(`${c.green}  Collection: ${candidate.name}${c.reset}`);
-        console.log(`${c.green}  Chain:      ${candidate.chain}${c.reset}`);
-        console.log(`${c.green}  Tx:         ${r.txHash}${c.reset}\n`);
       } else {
         totalFailLocal++;
+        const err = (r.error || '').slice(0, 50);
         
-        // Check if this was a "profit opportunity" that failed (still worth alerting)
+        // Color-code by error type
+        if (err.includes('not active')) {
+          logEvent('SKIP', `${name} [${chain}] ${contract} → mint not active`, c.yellow);
+        } else if (err.includes('Insufficient')) {
+          logEvent('SKIP', `${name} [${chain}] ${contract} → no ETH on chain`, c.yellow);
+        } else if (err.includes('All') || err.includes('reverted')) {
+          logEvent('PAID', `${name} [${chain}] ${contract} (${source})`, c.red);
+        } else {
+          logEvent('ERROR', `${name} [${chain}] ${contract} → ${err}`, c.red);
+        }
+        
+        // Check if this was a profit opportunity that failed
         const profitType = classifyCandidate(candidate);
         if (profitType && (profitType === 'cheap_mint' || profitType === 'flip' || profitType === 'free_mint')) {
-          // This was a profit opportunity that we attempted — alert user!
           notifyProfit({
             type: profitType as any,
             title: `${profitType.toUpperCase()} OPPORTUNITY — ${candidate.name || 'Unknown'}`,
@@ -546,24 +565,23 @@ async function main(): Promise<void> {
   console.log(`  Max mints/cycle: ${MAX_MINTS_PER_CYCLE}`);
   console.log(`  Max candidates:  ${MAX_CANDIDATES_PER_SCAN}`);
   console.log(`  Chains:          ${SCAN_CHAINS.join(', ')}`);
-  console.log(`\n${c.green}✓ Bot ready. Starting dashboard...${c.reset}\n`);
+  console.log(`\n${c.green}✓ Bot ready. Starting scrolling log...${c.reset}\n`);
 
   // Start HTTP server for remote monitoring (via ngrok)
   await startHttpServer();
 
+  // Print header ONCE (no screen clearing — scrolling log mode)
+  printHeader(smartAccountAddress);
+
   await new Promise(r => setTimeout(r, 2000));
 
-  // Setup render interval (every 500ms when idle)
+  // SCROLLING LOG MODE — no screen clearing, events scroll naturally
   let nextScanAt = Date.now();
-  const renderInterval = setInterval(async () => {
-    if (!isScanning) {
-      await renderDashboard(false);
-    }
-  }, DASHBOARD_REFRESH_MS);
+  // Print status line every 30 seconds (not every 500ms)
+  setInterval(() => { printStatusLine(false); }, STATUS_INTERVAL_MS);
 
   // Handle Ctrl+C gracefully
   process.on('SIGINT', () => {
-    clearInterval(renderInterval);
     console.log(`\n${c.yellow}Stopping bot...${c.reset}`);
     console.log(`${c.bold}Final stats:${c.reset}`);
     console.log(`  Scans:    ${totalScansLocal}`);
@@ -586,9 +604,11 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // Render in "scanning" state then execute
-    await renderDashboard(true);
+    // Log scan start (scrolling log — no screen clear)
+    logEvent('SCAN', `Starting scan #${totalScansLocal + 1}...`, c.cyan);
     await executeScanCycle();
+    // Print compact status after scan
+    await printStatusLine(true);
 
     // Smart backoff — if scan found 0 new candidates, wait longer (15s instead of 3s)
     // This saves CPU when OpenSea 12h window has no new contracts
