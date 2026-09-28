@@ -250,6 +250,44 @@ async function renderDashboard(isScanning: boolean): Promise<void> {
 }
 
 // ============================================================================
+// SCROLLING LOG FUNCTIONS
+// ============================================================================
+
+let lastStatusLineTime = 0;
+const STATUS_INTERVAL_MS = 30_000;
+
+function printStatusLine(isScanning: boolean): void {
+  const now = Date.now();
+  if (now - lastStatusLineTime < STATUS_INTERVAL_MS && !isScanning) return;
+  lastStatusLineTime = now;
+
+  const uptime = Math.floor((now - startTime) / 1000);
+  const time = new Date().toLocaleTimeString();
+  const status = isScanning ? `${c.yellow}● SCANNING${c.reset}` : `${c.green}● IDLE${c.reset}`;
+
+  console.log(`${c.dim}[${time}]${c.reset} ${status} ${c.dim}| up:${formatETA(uptime)} | scans:${totalScansLocal} | mints:${totalMintsLocal} | ✓${c.green}${totalSuccessLocal}${c.reset}${c.dim} ✗${c.red}${totalFailLocal}${c.reset}${c.dim} | next: ${lastCycleResults.length === 0 ? '15s' : '3s'}${c.reset}`);
+}
+
+function logEvent(type: string, message: string, color: string = c.reset): void {
+  const time = new Date().toLocaleTimeString();
+  const typeTag = `${c.dim}[${time}]${c.reset} ${color}${type.padEnd(12)}${c.reset}`;
+  console.log(`${typeTag} ${color}${message}${c.reset}`);
+}
+
+function printHeader(smartAccount: string): void {
+  console.log(`${c.bold}${c.cyan}`);
+  console.log('  ╔══════════════════════════════════════════════════════════════╗');
+  console.log('  ║         🤖 LOCAL SNIPER BOT — SCROLLING LOG MODE              ║');
+  console.log('  ╚══════════════════════════════════════════════════════════════╝');
+  console.log(`${c.reset}`);
+  console.log(`${c.dim}  Smart Account: ${c.reset}${c.cyan}${smartAccount}${c.reset}`);
+  console.log(`${c.dim}  Config: maxCandidates=${MAX_CANDIDATES_PER_SCAN} maxMints=${MAX_MINTS_PER_CYCLE} chains=[${SCAN_CHAINS.join(', ')}]${c.reset}`);
+  console.log(`${c.dim}  Strategies: OpenSea + Alchemy + Social + Whale + Flip + Cheap + DeFi${c.reset}`);
+  console.log(`${c.dim}  ────────────────────────────────────────────────────────────${c.reset}`);
+  console.log();
+}
+
+// ============================================================================
 // SCAN EXECUTION
 // ============================================================================
 
