@@ -807,6 +807,30 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
     }
   }
 
+  // Strategy 6: NFT FLIP SCANNER — find underpriced NFTs on OpenSea
+  // Scans for NFTs listed 40%+ below collection floor → buy → relist → profit
+  // This is the PRIMARY profit strategy (free mints are bonus)
+  if (candidates.length < maxCandidates) {
+    try {
+      const { scanForFlipOpportunities, flipToMintCandidate } = await import('@/lib/flip-scanner');
+      const flips = await scanForFlipOpportunities(maxCandidates - candidates.length);
+      logActivity({
+        type: 'chain_scan',
+        message: `Flip scanner: ${flips.length} underpriced NFTs found (buy < 60% of floor)`,
+      });
+      for (const flip of flips) {
+        if (candidates.length >= maxCandidates) break;
+        const dedupKey = `flip:${flip.contract}:${flip.tokenId}`;
+        if (tried.has(dedupKey)) continue;
+        tried.add(dedupKey);
+        allScannedAddresses.push(flip.contract);
+        candidates.push(flipToMintCandidate(flip));
+      }
+    } catch (err: any) {
+      logError(`Flip scanner failed: ${err.message?.slice(0, 80)}`);
+    }
+  }
+
   // Record stats
   recordScan(candidates.length, allScannedAddresses);
 
