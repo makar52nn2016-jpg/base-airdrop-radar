@@ -693,7 +693,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
 
         for (const { contract: contractAddress, chain: alchemyChain } of alchemyContracts) {
           if (candidates.length >= maxCandidates) break;
-          const dedupKey = `alchemy:${alchemyChain}:${contractAddress}`;
+          const dedupKey = `${alchemyChain}:${contractAddress}`;
           if (tried.has(dedupKey)) continue;
           tried.add(dedupKey);
 
@@ -746,7 +746,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
       const socialCandidates = await scanSocialMediaForMints(maxCandidates - candidates.length);
       for (const c of socialCandidates) {
         if (candidates.length >= maxCandidates) break;
-        const dedupKey = `social:${c.contract}`;
+        const dedupKey = `${c.chain || 'unknown'}:${c.contract}`;
         if (tried.has(dedupKey)) continue;
         tried.add(dedupKey);
         allScannedAddresses.push(c.contract);
@@ -775,7 +775,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
           const whaleCandidates = await scanWhaleMints(chainKey, 3);
           for (const c of whaleCandidates) {
             if (candidates.length >= maxCandidates) break;
-            const dedupKey = `whale:${c.contract}`;
+            const dedupKey = `${c.chain || 'unknown'}:${c.contract}`;
             if (tried.has(dedupKey)) continue;
             tried.add(dedupKey);
             allScannedAddresses.push(c.contract);
@@ -796,7 +796,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
       const floorCandidates = await scanOpenSeaFloorZero(maxCandidates, 5);
       for (const c of floorCandidates) {
         if (candidates.length >= maxCandidates) break;
-        const dedupKey = `floor0:${c.contract}`;
+        const dedupKey = `${c.chain || 'base'}:${c.contract}`;
         if (tried.has(dedupKey)) continue;
         tried.add(dedupKey);
         allScannedAddresses.push(c.contract);
