@@ -107,7 +107,7 @@ const MAX_LOG_SIZE = 100;
 // 33 min uptime, all early contracts had expired TTL → being retried.
 // 1 hour TTL = no repeats for 1 hour after first attempt.
 const ATTEMPTED = new Map<string, number>(); // key = `${chain}:${contract}`, value = unix ms
-const ATTEMPTED_TTL_MS = 60 * 60 * 1000; // 1 hour (was 15 minutes)
+const ATTEMPTED_TTL_MS = 15 * 60 * 1000; // 15 min (FRESH strategy — retry sooner for newly opened mints)
 
 // TG notification cooldown — separate from ATTEMPTED (which blocks mint retry).
 // Even if we re-attempt a mint after 15min TTL, we don't spam TG about the same
@@ -564,14 +564,14 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
   // 3 contracts every cycle. With wider window + 1-hour TTL, bot sees more
   // unattempted candidates per scan → less repetition, more variety.
   try {
-    const events = await getRecentBaseTransfers(100, 12 * 3600, 4);
+    const events = await getRecentBaseTransfers(100, 30 * 60, 2);
     const mintContracts = filterMintEventsForChains(events, [
       'base', 'optimism', 'arbitrum', 'matic', 'ethereum',
     ]);
 
     logActivity({
       type: 'chain_scan',
-      message: `OpenSea: ${events.length} events (12h window, 4 pages), ${mintContracts.length} mint contracts found`,
+      message: `OpenSea: ${events.length} events (30min window, FRESH mints), ${mintContracts.length} mint contracts found`,
     });
 
     for (const { contract: contractAddress, slug, chain } of mintContracts) {
@@ -683,7 +683,7 @@ export async function scanForFreeMints(maxCandidates = 15): Promise<MintCandidat
         // Scan all 3 L2 chains in parallel — get fresh mints from each
         const alchemyContracts = await scanAlchemyMintsAcrossChains(
           ['base', 'optimism', 'arbitrum'],
-          500 // last 500 blocks per chain (~17 min on Base, ~30 min on OP/ARB)
+          30  // last 30 blocks = ~2 min on Base (FRESH mints only) (~17 min on Base, ~30 min on OP/ARB)
         );
 
         logActivity({
@@ -1117,6 +1117,76 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
         message: `Gas price fetch failed: ${e?.message?.slice(0, 60)}`,
         chain: chainKey,
       });
+    }
+
+    // v6: MINT STATE PRE-CHECK — verify mint is active before wasting UserOp.
+    // Reads mintActive(), saleActive(), totalSupply(), maxSupply() via static calls.
+    // If mint is paused or sold out → skip (don't waste time on UserOp submission).
+    try {
+      const { publicClient: pc } = getClientsForChain(chainKey);
+      const MINT_STATE_ABI = parseAbi([
+        'function mintActive() view returns (bool)',
+        'function saleActive() view returns (bool)',
+        'function isMintActive() view returns (bool)',
+        'function publicMintActive() view returns (bool)',
+        'function totalSupply() view returns (uint256)',
+        'function maxSupply() view returns (uint256)',
+        'function maxMintable() view returns (uint256)',
+        'function mintPaused() view returns (bool)',
+        'function paused() view returns (bool)',
+      ]);
+
+      const contract = getContract({
+        address: candidate.contract as `0x${string}`,
+        abi: MINT_STATE_ABI,
+        client: pc,
+      });
+
+      // Check if mint is active (try multiple function names)
+      let mintActive = true; // assume active if can't check
+      for (const fn of ['mintActive', 'saleActive', 'isMintActive', 'publicMintActive']) {
+        try {
+          const result = await (contract as any)[fn].read();
+          if (result === false) {
+            mintActive = false;
+            break;
+          }
+        } catch {}
+      }
+
+      // Check if paused
+      if (mintActive) {
+        for (const fn of ['mintPaused', 'paused']) {
+          try {
+            const result = await (contract as any)[fn].read();
+            if (result === true) {
+              mintActive = false;
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      // Check supply
+      if (mintActive) {
+        try {
+          const total = await (contract as any).totalSupply.read();
+          const max = await (contract as any).maxSupply.read().catch(() => null);
+          if (max !== null && total >= max) {
+            mintActive = false; // Sold out
+          }
+        } catch {}
+      }
+
+      if (!mintActive) {
+        return {
+          candidate,
+          success: false,
+          error: 'Mint not active or sold out (skipped to save time)',
+        };
+      }
+    } catch {
+      // If state check fails → proceed with mint (best effort)
     }
 
     // MULTI-FUNCTION MINT: try multiple mint function names in sequence.
