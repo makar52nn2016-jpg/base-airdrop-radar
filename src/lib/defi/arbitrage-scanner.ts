@@ -1,180 +1,65 @@
 /**
- * Arbitrage Scanner — finds price differences between DEXs on Base.
+ * Arbitrage Scanner — compares prices between Aerodrome and Uniswap V3.
  *
- * Strategy:
- *   1. Check WETH/USDC price on Aerodrome (getReserves)
- *   2. Check WETH/USDC price on other DEX (getReserves)
- *   3. If price diff > gas + fees → FLASH SWAP for profit
- *
- * Profit: $0.50-$5 per arbitrage
- * Frequency: 10-50+ opportunities per day
- * Capital: $0 (flash loans — borrow, swap, repay, keep profit)
+ * VERIFIED ADDRESSES:
+ *   Aerodrome Router: 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43 ✅
+ *   Aerodrome Factory: 0x420DD381b31aEf6683db6B902084cB0FFECe40Da ✅
+ *   Uniswap V3 Router: 0x2626664c2603336E57B271c5C0b26F421741e481 ✅
+ *   Uniswap V3 Factory: 0x33128a8fC17869897dcE68Ed026d694621f6FDfD ✅
  */
 
-import { BASE_TOKENS, BASE_DEFI, SMART_ACCOUNT } from './defi-config';
+import { BASE_DEFI, BASE_TOKENS } from './defi-config';
 import { logActivity } from '@/lib/stats';
 
 const ALCHEMY_BASE = 'https://base-mainnet.g.alchemy.com/v2/alch_BUo0TYqkD24rLEzrz4U3n';
 
-// ABI for checking pair reserves
-const GET_RESERVES_SELECTOR = '0x0902f1ac'; // getReserves()
-const TOKEN0_SELECTOR = '0x0dfe1681'; // token0()
-const TOKEN1_SELECTOR = '0xd2120a78'; // token1()
-
-interface PriceQuote {
-  tokenIn: string;
-  tokenOut: string;
-  price: number; // price of tokenIn in terms of tokenOut
-  reserveIn: bigint;
-  reserveOut: bigint;
-  dex: string;
-  pairAddress: string;
-}
-
-/**
- * Reads reserves from a DEX pair contract.
- */
-async function getPairReserves(pairAddress: string): Promise<{ reserve0: bigint; reserve1: bigint; token0: string; token1: string } | null> {
-  try {
-    const req = {
-      jsonrpc: '2.0',
-      method: 'eth_call',
-      params: [{ to: pairAddress, data: GET_RESERVES_SELECTOR }, 'latest'],
-      id: 1,
-    };
-    const resp = await fetch(ALCHEMY_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
-    });
-    const data = await resp.json();
-    if (data.error || !data.result || data.result === '0x') return null;
-
-    const hex = data.result.slice(2);
-    const reserve0 = BigInt('0x' + hex.slice(0, 64));
-    const reserve1 = BigInt('0x' + hex.slice(64, 128));
-
-    // Get token0
-    const req2 = {
-      jsonrpc: '2.0',
-      method: 'eth_call',
-      params: [{ to: pairAddress, data: TOKEN0_SELECTOR }, 'latest'],
-      id: 2,
-    };
-    const resp2 = await fetch(ALCHEMY_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req2),
-    });
-    const data2 = await resp2.json();
-    if (data2.error || !data2.result) return null;
-
-    const token0 = '0x' + data2.result.slice(-40).toLowerCase();
-
-    return { reserve0, reserve1, token0, token1: '' };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Gets the WETH price in USDC from a DEX pair.
- * Uses constant product formula: price = reserveOut / reserveIn
- */
-export async function getWethPriceInUsdc(): Promise<{ price: number; source: string } | null> {
-  try {
-    // Try Aerodrome Factory to find WETH/USDC pair
-    // For now, use Alchemy to get the price
-    const weth = BASE_TOKENS.WETH;
-    const usdc = BASE_TOKENS.USDC;
-
-    // Query Alchemy for recent WETH transfers to estimate price
-    const req = {
-      jsonrpc: '2.0',
-      method: 'alchemy_getAssetTransfers',
-      params: [{
-        fromBlock: '0x0',
-        toBlock: 'latest',
-        category: ['erc20'],
-        contractAddress: weth,
-        maxCount: '0x5',
-        order: 'desc',
-      }],
-      id: 1,
-    };
-
-    const resp = await fetch(ALCHEMY_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
-    });
-    const data = await resp.json();
-    const transfers = data.result?.transfers || [];
-
-    if (transfers.length === 0) return null;
-
-    // Average WETH transfer value to estimate price
-    let totalValue = 0n;
-    let count = 0;
-    for (const t of transfers) {
-      const val = BigInt(t.rawContract?.value || '0x0');
-      if (val > 0n) {
-        totalValue += val;
-        count++;
-      }
-    }
-
-    if (count === 0) return null;
-    const avgWeth = Number(totalValue) / 1e18 / count;
-    // Assume ETH price ~$3000 (will be replaced with actual price from oracle)
-    const estimatedPrice = 3000;
-
-    return { price: estimatedPrice, source: 'estimated' };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Scans for arbitrage opportunities between DEXs on Base.
- * Returns opportunities where price difference > gas + fees.
- */
-export async function scanArbitrageOpportunities(
-  maxResults = 5
-): Promise<Array<{
-  tokenIn: string;
-  tokenOut: string;
-  buyDex: string;
-  sellDex: string;
-  buyPrice: number;
-  sellPrice: number;
-  profitEth: number;
-  profitUsd: number;
-}>> {
+export async function scanArbitrageOpportunities(maxResults = 5): Promise<any[]> {
   const opportunities: any[] = [];
 
   try {
-    // Get current WETH price
-    const wethPrice = await getWethPriceInUsdc();
-    if (!wethPrice) return [];
-
     logActivity({
       type: 'chain_scan',
-      message: `Arbitrage scan: WETH ~$${wethPrice.price} (source: ${wethPrice.source})`,
+      message: `Arbitrage: checking Aerodrome vs Uniswap V3 prices...`,
     });
 
-    // TODO: When we find the Aerodrome pair address, we can check actual reserves
-    // and compare with other DEXs for real arbitrage opportunities.
-    //
-    // For now, this is a framework that will work once we have pair addresses.
-    //
-    // The logic would be:
-    // 1. Get reserves from Aerodrome WETH/USDC pair
-    // 2. Get reserves from Uniswap V3 WETH/USDC pool
-    // 3. Calculate prices from reserves
-    // 4. If price difference > 0.3% → arbitrage opportunity
-    // 5. Execute flash swap: borrow → buy on cheaper → sell on more expensive → repay → profit
+    // Check WETH/USDC price on Aerodrome
+    const aeroPrice = await getAerodromePrice(BASE_TOKENS.WETH, BASE_TOKENS.USDC);
 
+    // Check WETH/USDC price on Uniswap V3
+    const uniPrice = await getUniswapV3Price(BASE_TOKENS.WETH, BASE_TOKENS.USDC);
+
+    if (aeroPrice && uniPrice && aeroPrice > 0 && uniPrice > 0) {
+      const diff = Math.abs(aeroPrice - uniPrice);
+      const diffPct = (diff / Math.min(aeroPrice, uniPrice)) * 100;
+
+      logActivity({
+        type: 'chain_scan',
+        message: `Arbitrage: WETH/USDC — Aero: $${aeroPrice.toFixed(2)} | Uni: $${uniPrice.toFixed(2)} | diff: ${diffPct.toFixed(2)}%`,
+      });
+
+      if (diffPct > 0.5) { // 0.5% price difference = profitable arbitrage
+        opportunities.push({
+          tokenIn: BASE_TOKENS.WETH,
+          tokenOut: BASE_TOKENS.USDC,
+          buyDex: aeroPrice < uniPrice ? 'Aerodrome' : 'Uniswap',
+          sellDex: aeroPrice < uniPrice ? 'Uniswap' : 'Aerodrome',
+          buyPrice: Math.min(aeroPrice, uniPrice),
+          sellPrice: Math.max(aeroPrice, uniPrice),
+          profitUsd: diff,
+          diffPct,
+        });
+
+        logActivity({
+          type: 'candidate_found',
+          message: `🔥 ARBITRAGE: WETH/USDC diff ${diffPct.toFixed(2)}% — buy ${aeroPrice < uniPrice ? 'Aero' : 'Uni'} sell ${aeroPrice < uniPrice ? 'Uni' : 'Aero'} → profit ~$${diff.toFixed(2)}`,
+        });
+      }
+    } else {
+      logActivity({
+        type: 'chain_scan',
+        message: `Arbitrage: Aero price: ${aeroPrice || '?'} | Uni price: ${uniPrice || '?'}`,
+      });
+    }
   } catch (e: any) {
     logActivity({
       type: 'error',
@@ -185,9 +70,88 @@ export async function scanArbitrageOpportunities(
   return opportunities;
 }
 
-/**
- * Clears any caches.
- */
-export function clearArbitrageCache() {
-  // Reserved for future cache clearing
+async function getAerodromePrice(tokenA: string, tokenB: string): Promise<number | null> {
+  try {
+    // Use Aerodrome Router getAmountsOut to get price
+    // getAmountsOut(uint256, address[]) = 0xd06ca61f
+    // Input: 1 WETH = 10^18, path = [WETH, USDC]
+    const amountIn = (10n ** 18n).toString(16).padStart(64, '0');
+    const path = tokenA.toLowerCase().slice(2).padStart(64, '0') + tokenB.toLowerCase().slice(2).padStart(64, '0');
+    const data = '0xd06ca61f' + amountIn + '0000000000000000000000000000000000000000000000000000000000000040' + '0000000000000000000000000000000000000000000000000000000000000002' + path;
+
+    const req = {
+      jsonrpc: '2.0',
+      method: 'eth_call',
+      params: [{ to: BASE_DEFI.aerodromeRouter, data }, 'latest'],
+      id: 1,
+    };
+    const resp = await fetch(ALCHEMY_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    const data2 = await resp.json();
+    if (data2.error || !data2.result || data2.result === '0x') return null;
+
+    // Parse getAmountsOut response — last uint256 is the output amount
+    const hex = data2.result.slice(2);
+    const lastAmount = BigInt('0x' + hex.slice(-64));
+    // USDC has 6 decimals
+    return Number(lastAmount) / 1e6;
+  } catch {
+    return null;
+  }
+}
+
+async function getUniswapV3Price(tokenA: string, tokenB: string): Promise<number | null> {
+  try {
+    // Use Uniswap V3 Factory getPool to find the pool
+    // getPool(address,address,uint24) = 0x1698ee82
+    // Try fee tiers: 500 (0x1f4), 3000 (0xbb8), 10000 (0x2710)
+    for (const fee of ['00000000000000000000000000000000000000000000000000000000000001f4', '0000000000000000000000000000000000000000000000000000000000000bb8', '0000000000000000000000000000000000000000000000000000000000002710']) {
+      const data = '0x1698ee82' + tokenA.toLowerCase().slice(2).padStart(64, '0') + tokenB.toLowerCase().slice(2).padStart(64, '0') + fee;
+      const req = {
+        jsonrpc: '2.0',
+        method: 'eth_call',
+        params: [{ to: BASE_DEFI.uniswapV3Factory, data }, 'latest'],
+        id: 1,
+      };
+      const resp = await fetch(ALCHEMY_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      const data2 = await resp.json();
+      if (data2.error || !data2.result) continue;
+
+      const pool = '0x' + data2.result.slice(-40);
+      if (pool === '0x0000000000000000000000000000000000000000') continue;
+
+      // Get pool reserves via slot0() = 0x3850c7bd
+      const slot0Req = {
+        jsonrpc: '2.0',
+        method: 'eth_call',
+        params: [{ to: pool, data: '0x3850c7bd' }, 'latest'],
+        id: 2,
+      };
+      const slot0Resp = await fetch(ALCHEMY_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(slot0Req),
+      });
+      const slot0Data = await slot0Resp.json();
+      if (slot0Data.error || !slot0Data.result || slot0Data.result === '0x') continue;
+
+      // slot0 returns: sqrtPriceX96, tick, protocolFee, ...
+      const hex = slot0Data.result.slice(2);
+      const sqrtPriceX96 = BigInt('0x' + hex.slice(0, 64));
+      // price = (sqrtPriceX96 / 2^96)^2
+      // For WETH/USDC: price = (sqrtPriceX96^2) / (2^192) * 10^(18-6)
+      const price = Number((sqrtPriceX96 * sqrtPriceX96) / (2n ** 192n)) * 1e12;
+      if (price > 0) return price;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

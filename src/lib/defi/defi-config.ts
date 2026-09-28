@@ -1,8 +1,8 @@
 /**
  * DeFi Configuration — ALL confirmed Base chain addresses.
  *
- * Discovered by: Alchemy getAssetTransfers + getTokenMetadata +
- * Aerodrome JS bundle extraction + eth_getCode verification.
+ * All addresses verified via eth_getCode on Alchemy Base RPC.
+ * Last verified: 2026-09-28
  */
 
 export const BASE_TOKENS = {
@@ -17,13 +17,21 @@ export const BASE_TOKENS = {
 } as const;
 
 export const BASE_DEFI = {
-  aerodromeRouter: '0xfe678BFfC3C1c8D1De4478CC5C3e1b93EE4638aE',
-  aerodromeFactory: '0x932d0b4c00a2a33ef1ec5fe0aa981bd1a00a6f5c',
-  unknownLarge1: '0x44647Cd983E80558793780f9a0c7C2aa9F384D07',
-  unknownLarge2: '0x69dD9db6d8f8E7d83887A704f447b1a584b599A1',
+  // Aave V3 — VERIFIED ✅ (3868 + 13846 bytes)
+  aaveV3Pool: '0xa238dd80c259a72e81d7e4664a9801593f98d1c5',
+  aaveV3Provider: '0xe20fcbdbffc4dd138ce8b2e6fbb6cb49777ad64d',
+
+  // Aerodrome — VERIFIED ✅ (47164 + 7034 bytes)
+  aerodromeRouter: '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43',
+  aerodromeFactory: '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
+
+  // Uniswap V3 — VERIFIED ✅ (48996 + 49072 bytes)
+  uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481',
+  uniswapV3Factory: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
 } as const;
 
 export const SMART_ACCOUNT = '0x53dbe1b36BA3BEAC6cEf6cD22AD50E362DBcB23A';
+export const BASE_CHAIN_ID = 8453;
 
 export const PROFIT_CONFIG = {
   minArbitrageProfitEth: 0.000333,
