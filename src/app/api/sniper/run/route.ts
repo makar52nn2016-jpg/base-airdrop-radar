@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { runSniperCycle } from '@/lib/sniper';
 import { isPimlicoConfigured } from '@/lib/pimlico';
+import { notifySniperMalfunction } from '@/lib/telegram';
 
 /**
  * POST /api/sniper/run
@@ -25,6 +26,11 @@ export async function POST(request: Request) {
 
   const pimlicoStatus = isPimlicoConfigured();
   if (!pimlicoStatus.configured) {
+    // v9 — TG alert: sniper can't run without Pimlico
+    void notifySniperMalfunction({
+      error: `Pimlico not configured. Missing: ${pimlicoStatus.missing.join(', ')}`,
+      context: 'Pre-flight check in /api/sniper/run',
+    }).catch(() => {});
     return NextResponse.json(
       {
         success: false,
@@ -45,10 +51,16 @@ export async function POST(request: Request) {
       ...result,
     });
   } catch (err: any) {
+    // v9 — TG alert: sniper itself broke (not a contract revert)
+    const errMsg = err?.message || 'Unknown error';
+    void notifySniperMalfunction({
+      error: errMsg,
+      context: 'runSniperCycle threw — bot is broken',
+    }).catch(() => {});
     return NextResponse.json(
       {
         success: false,
-        error: err?.message || 'Unknown error',
+        error: errMsg,
       },
       { status: 500 }
     );

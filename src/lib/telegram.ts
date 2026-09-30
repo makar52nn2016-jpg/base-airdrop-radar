@@ -357,3 +357,41 @@ ${lastMintLine}
 
   await sendTelegramMessage(msg);
 }
+
+/**
+ * v9 — Sniper malfunction alert.
+ *
+ * Fires ONLY when the sniper bot itself is broken — NOT for individual mint
+ * reverts (those are expected during blind-mint strategy and would spam TG).
+ *
+ * Triggers:
+ *   - runSniperCycle() throws an uncaught error (caught in /api/sniper/run)
+ *   - Pimlico configuration is missing (bot can't init Smart Account)
+ *   - Smart Account initialization fails (network or signer issue)
+ *
+ * Per user request: only alert on (1) successful mints and (2) sniper
+ * malfunction. Everything else (scan summaries, heartbeats, daily digests,
+ * per-mint failures) should be silent.
+ */
+export async function notifySniperMalfunction(opts: {
+  error: string;
+  context?: string;
+  timestamp?: string;
+}): Promise<void> {
+  const ts = opts.timestamp || new Date().toISOString();
+  const contextLine = opts.context ? `\n\n📍 *Context:* ${opts.context}` : '';
+
+  const msg = `🚨 *SNIPER MALFUNCTION*
+
+⏰ Time: ${ts}${contextLine}
+
+❌ *Error:*
+\`\`\`
+${(opts.error || 'unknown error').slice(0, 800)}
+\`\`\`
+
+🔧 *Action required:*
+Check Vercel logs — the bot is no longer running correctly.`;
+
+  await sendTelegramMessage(msg);
+}

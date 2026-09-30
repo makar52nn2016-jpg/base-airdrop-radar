@@ -15,6 +15,8 @@ import {
   isSponsorshipConfigured,
   type ChainKey,
 } from '@/lib/pimlico';
+// v9: notifyHeartbeat + notifyMintFailure removed — per user request, only
+// successful mints and sniper malfunctions trigger TG alerts now.
 import {
   listBaseCollections,
   getCollectionContracts,
@@ -37,9 +39,7 @@ import {
 } from '@/lib/stats';
 import {
   notifyMintSuccess,
-  notifyMintFailure,
   notifyListingLink,
-  notifyHeartbeat,
   sendTelegramMessage,
 } from '@/lib/telegram';
 import { checkContractQuality, isSpammyName } from '@/lib/quality';
@@ -1372,26 +1372,17 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
     markAttempted(chainKey, candidate.contract);
     recordMintFailure(errorMsg, candidate.contract, chainKey);
 
-    // SPAM FILTER: skip TG notification for "boring" reverts (paid mints, wrong args)
-    // These are EXPECTED during blind-mint — would generate 50+ msgs/hour otherwise.
-    // Only notify on UNEXPECTED errors (network issues, RPC failures, etc).
-    if (!isBoringRevertError(errorMsg)) {
-      void notifyMintFailure({
-        contract: candidate.contract,
-        functionName: candidate.functionName,
-        error: errorMsg,
-        collectionName: candidate.name,
-        chain: chainKey,
-      }).catch(() => {});
-    } else {
-      // Still log it locally so user can see in dashboard
-      logActivity({
-        type: 'mint_failed_silent',
-        message: `🎲 blind revert on ${candidate.name?.slice(0, 30)} (${chainKey}): ${errorMsg.slice(0, 60)}`,
-        chain: chainKey,
-        contract: candidate.contract,
-      });
-    }
+    // v9 — NO TG notification for individual mint failures.
+    // Per user request: only alert on (1) successful mints and (2) sniper malfunction.
+    // Contract reverts (paid/whitelist) are EXPECTED during blind-mint strategy
+    // and would generate 50+ msgs/hour. Network/RPC errors are caught at the
+    // endpoint level (route.ts) and trigger notifySniperMalfunction there.
+    logActivity({
+      type: 'mint_failed_silent',
+      message: `🎲 mint failed on ${candidate.name?.slice(0, 30)} (${chainKey}): ${errorMsg.slice(0, 80)}`,
+      chain: chainKey,
+      contract: candidate.contract,
+    });
 
     return result;
   }
@@ -1411,18 +1402,10 @@ export async function runSniperCycle(maxMintsPerCycle = 3): Promise<{
 }> {
   SCAN_COUNTER += 1;
 
-  // Fire heartbeat every Nth scan so user knows cron is alive
-  if (SCAN_COUNTER % HEARTBEAT_INTERVAL === 0) {
-    const lastMintAgo = LAST_MINT_TIMESTAMP
-      ? Math.floor((Date.now() - LAST_MINT_TIMESTAMP) / 1000)
-      : null;
-    void notifyHeartbeat({
-      scanNumber: SCAN_COUNTER,
-      totalScans: SCAN_COUNTER,
-      lastMintAgoSec: lastMintAgo,
-      nextScanInSec: 60,
-    }).catch(() => {});
-  }
+  // v9 — REMOVED heartbeat notification.
+  // Per user request: only alert on (1) successful mints and (2) sniper malfunction.
+  // Cron health is monitored via the malfunction alert in /api/sniper/run (route.ts)
+  // which fires when runSniperCycle itself throws.
 
   try {
     const candidates1 = await scanForFreeMints(maxMintsPerCycle * 3);

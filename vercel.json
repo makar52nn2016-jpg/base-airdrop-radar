@@ -18,16 +18,6 @@
     "src/app/api/sniper/mint/route.ts": {
       "memory": 512,
       "maxDuration": 60
-    },
-    "src/app/api/sniper/daily/route.ts": {
-      "memory": 256,
-      "maxDuration": 30
     }
-  },
-  "crons": [
-    {
-      "path": "/api/sniper/daily",
-      "schedule": "0 23 * * *"
-    }
-  ]
+  }
 }
