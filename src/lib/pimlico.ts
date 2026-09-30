@@ -106,61 +106,37 @@ function pimlicoUrl(chainKey: ChainKey): string {
 }
 
 /**
- * v6 — Custom HTTP transport that retries with fallback RPCs.
- * Primary RPC is tried first; on timeout/network error, fallbacks are tried in order.
- * This addresses the "RPC Request failed" errors seen with single-RPC setups.
+ * v7 — Simplified RPC transport.
+ *
+ * Previous v6 fallbackHttpTransport had a bug: viem's http transport passes
+ * a Request OBJECT as the first arg to fetch (not a string URL), and our
+ * wrapper was ignoring it, dropping the request body. This caused
+ * "HTTP request failed. URL: [object Object]" errors on every eth_call
+ * (especially for Safe Proxy Factory's proxyCreationCode() call).
+ *
+ * v7 fixes this by using viem's standard http() with the primary RPC URL only.
+ * The fallback list is kept for future use, but for now mainnet.base.org
+ * (Coinbase official) is reliable enough to be primary without fallback.
+ *
+ * For multi-RPC reliability, see viem's `fallback` transport:
+ * https://viem.sh/docs/clients/transports/fallback.html
  */
-function fallbackHttpTransport(urls: string[]) {
-  // viem's http() accepts a string OR a BatchOptions object.
-  // To get a fallback-capable transport, we use a custom fetch wrapper that
-  // tries each URL until one succeeds. The first successful URL becomes the
-  // cached transport URL for that client instance (warm-cache optimization).
-  let cachedUrl: string | null = null;
-
+function makeHttpTransport(url: string) {
   return http({
-    url: urls[0], // primary URL (first attempt)
+    url,
     fetchOptions: { keepalive: true },
-    // viem's http transport supports a `fetch` override — we wrap it to fall back
+    // Add a default timeout via AbortSignal if not set — prevents hung requests
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      const tryFetch = async (url: string): Promise<Response> => {
-        const req = new Request(url, init);
-        return fetch(req, { ...init, signal: init?.signal || AbortSignal.timeout(8000) } as any);
-      };
-
-      // Try cached successful URL first (warm path)
-      if (cachedUrl) {
-        try {
-          return await tryFetch(cachedUrl);
-        } catch {
-          cachedUrl = null; // invalidate cache, fall through to scan
-        }
-      }
-
-      // Try each URL in order
-      let lastErr: any;
-      for (const url of urls) {
-        try {
-          const resp = await tryFetch(url);
-          // If response is a 5xx or 429, treat as failure and try next
-          if (resp.status >= 500 || resp.status === 429) {
-            lastErr = new Error(`HTTP ${resp.status} from ${url}`);
-            continue;
-          }
-          cachedUrl = url; // warm the cache
-          return resp;
-        } catch (e: any) {
-          lastErr = e;
-          continue;
-        }
-      }
-      throw lastErr || new Error('All RPC URLs failed');
+      const signal = init?.signal || AbortSignal.timeout(8000);
+      // Pass through viem's Request object as-is — DO NOT recreate
+      return fetch(input as any, { ...init, signal } as any);
     },
   });
 }
 
 /**
  * Returns cached clients for the given chain. Creates them on first call.
- * v6: now uses fallbackHttpTransport with primary + fallback URLs.
+ * v7: now uses makeHttpTransport with single primary RPC URL.
  */
 export function getClientsForChain(chainKey: ChainKey) {
   if (clientCache.has(chainKey)) {
@@ -168,12 +144,10 @@ export function getClientsForChain(chainKey: ChainKey) {
   }
 
   const config = CHAIN_CONFIGS[chainKey];
-  const fallbacks = CHAIN_RPC_FALLBACKS[chainKey] || [];
-  const allUrls = [config.rpcUrl, ...fallbacks];
 
   const publicClient = createPublicClient({
     chain: config.chain,
-    transport: fallbackHttpTransport(allUrls),
+    transport: makeHttpTransport(config.rpcUrl),
   });
 
   const bundlerClient = createBundlerClient({
