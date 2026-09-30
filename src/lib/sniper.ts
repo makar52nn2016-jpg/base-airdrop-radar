@@ -12,6 +12,7 @@ import {
   getClientsForChain,
   CHAIN_CONFIGS,
   ALL_CHAINS,
+  isSponsorshipConfigured,
   type ChainKey,
 } from '@/lib/pimlico';
 import {
@@ -1068,31 +1069,40 @@ export async function executeMint(candidate: MintCandidate): Promise<MintResult>
 
   const chainKey = candidate.chain || 'base';
 
-  // v3: BALANCE CHECK before mint attempt.
-  // User reported bot was attempting mints on chains where Smart Account has 0 ETH
-  // (arbitrum/optimism). Every such mint reverts in simulation — wasted UserOp slot,
-  // and prevents a useful Base mint from being attempted that cycle.
-  // Skip if Smart Account has < 0.00005 ETH (~$0.15) on the candidate's chain.
+  // v5: BALANCE CHECK before mint attempt — NOW CONDITIONAL on sponsorship.
+  // When PIMLICO_SPONSOR_POLICY_ID is set, Pimlico pays gas via sponsorship,
+  // so the Smart Account's ETH balance is irrelevant — skip the check entirely
+  // and let Pimlico handle gas. When sponsorship is NOT configured, fall back
+  // to requiring ≥0.00005 ETH on the candidate's chain for self-paid gas.
   // 0.00005 ETH = 50_000_000_000_000 wei (5 * 10^13)
   const MIN_ETH_FOR_GAS = 50_000_000_000_000n; // 0.00005 ETH in wei
+  const sponsorshipActive = isSponsorshipConfigured();
   try {
     const { publicClient: pc } = getClientsForChain(chainKey);
     const balance: bigint = await pc.getBalance({
       address: (await initSmartAccount(chainKey)).smartAccountAddress,
     });
-    if (balance < MIN_ETH_FOR_GAS) {
-      const balanceEth = Number(balance) / 1e18;
+    const balanceEth = Number(balance) / 1e18;
+    if (!sponsorshipActive && balance < MIN_ETH_FOR_GAS) {
       logActivity({
         type: 'mint_failure',
-        message: `Skip mint on ${chainKey} — Smart Account has only ${balanceEth.toFixed(6)} ETH (need ≥0.00005)`,
+        message: `Skip mint on ${chainKey} — Smart Account has only ${balanceEth.toFixed(6)} ETH (need ≥0.00005, or set PIMLICO_SPONSOR_POLICY_ID)`,
         chain: chainKey,
         contract: candidate.contract,
       });
       return {
         candidate,
         success: false,
-        error: `Insufficient ETH on ${chainKey} (balance: ${balanceEth.toFixed(6)} ETH, need ≥0.00005). Send ETH to Smart Account on ${chainKey} chain to enable minting there.`,
+        error: `Insufficient ETH on ${chainKey} (balance: ${balanceEth.toFixed(6)} ETH, need ≥0.00005). Send ETH to Smart Account on ${chainKey} chain, OR set PIMLICO_SPONSOR_POLICY_ID env var for gasless mints.`,
       };
+    }
+    // Log informational only when sponsorship covers 0-balance account
+    if (sponsorshipActive && balance < MIN_ETH_FOR_GAS) {
+      logActivity({
+        type: 'info',
+        message: `Mint attempt on ${chainKey} with 0 ETH — Pimlico sponsorship will pay gas`,
+        chain: chainKey,
+      });
     }
   } catch (e: any) {
     // Don't fail mint if balance check itself fails — proceed and let Pimlico catch it

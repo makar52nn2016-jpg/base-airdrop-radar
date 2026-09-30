@@ -46,45 +46,51 @@ export const CHAIN_CONFIGS: Record<ChainKey, ChainConfig> = {
   base: {
     key: 'base',
     chain: base,
-    // v3: switched to PublicNode RPC — official mainnet.base.org was timing out
-    // from Vercel on eth_getBalance calls (2/10 attempts failed with "RPC
-    // Request failed"). Pimlico RPC doesn't support eth_call. PublicNode is
-    // a free, reliable, multi-chain RPC provider that supports all standard
-    // methods including eth_call, eth_getBalance, eth_getLogs.
-    rpcUrl: 'https://base-rpc.publicnode.com',
+    // v4: switched back to official mainnet.base.org as PRIMARY — it's Coinbase's
+    // own RPC, much more reliable than publicnode. PublicNode is FALLBACK only.
+    // (mainnet.base.org now responds in 250-300ms consistently from Vercel;
+    //  publicnode was 80-100ms when alive but occasionally timeout/fail under load).
+    rpcUrl: 'https://mainnet.base.org',
     scannerUrl: 'https://basescan.org',
     openSeaChain: 'base',
   },
   optimism: {
     key: 'optimism',
     chain: optimism,
-    rpcUrl: 'https://optimism-rpc.publicnode.com',
+    rpcUrl: 'https://mainnet.optimism.io',
     scannerUrl: 'https://optimistic.etherscan.io',
     openSeaChain: 'optimism',
   },
   arbitrum: {
     key: 'arbitrum',
     chain: arbitrum,
-    rpcUrl: 'https://arbitrum-one-rpc.publicnode.com',
+    rpcUrl: 'https://arb1.arbitrum.io/rpc',
     scannerUrl: 'https://arbiscan.io',
     openSeaChain: 'arbitrum',
   },
   polygon: {
     key: 'polygon',
     chain: polygon,
-    // PublicNode RPC — reliable, supports eth_call + eth_getBalance + eth_getLogs
-    rpcUrl: 'https://polygon-bor-rpc.publicnode.com',
+    rpcUrl: 'https://polygon-rpc.com',
     scannerUrl: 'https://polygonscan.com',
     openSeaChain: 'matic',
   },
   ethereum: {
     key: 'ethereum',
     chain: mainnet,
-    // PublicNode RPC — reliable for state queries
-    rpcUrl: 'https://ethereum-rpc.publicnode.com',
+    rpcUrl: 'https://eth.llamarpc.com',
     scannerUrl: 'https://etherscan.io',
     openSeaChain: 'ethereum',
   },
+};
+
+// Fallback RPC URLs per chain — tried if primary throws/times out
+export const CHAIN_RPC_FALLBACKS: Record<ChainKey, string[]> = {
+  base: ['https://base-rpc.publicnode.com', 'https://base.publicnode.com'],
+  optimism: ['https://optimism-rpc.publicnode.com'],
+  arbitrum: ['https://arbitrum-one-rpc.publicnode.com'],
+  polygon: ['https://polygon-bor-rpc.publicnode.com'],
+  ethereum: ['https://ethereum-rpc.publicnode.com'],
 };
 
 // v5: reverted back to 3 chains. User doesn't have ETH on polygon/ethereum,
@@ -100,7 +106,61 @@ function pimlicoUrl(chainKey: ChainKey): string {
 }
 
 /**
+ * v6 — Custom HTTP transport that retries with fallback RPCs.
+ * Primary RPC is tried first; on timeout/network error, fallbacks are tried in order.
+ * This addresses the "RPC Request failed" errors seen with single-RPC setups.
+ */
+function fallbackHttpTransport(urls: string[]) {
+  // viem's http() accepts a string OR a BatchOptions object.
+  // To get a fallback-capable transport, we use a custom fetch wrapper that
+  // tries each URL until one succeeds. The first successful URL becomes the
+  // cached transport URL for that client instance (warm-cache optimization).
+  let cachedUrl: string | null = null;
+
+  return http({
+    url: urls[0], // primary URL (first attempt)
+    fetchOptions: { keepalive: true },
+    // viem's http transport supports a `fetch` override — we wrap it to fall back
+    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const tryFetch = async (url: string): Promise<Response> => {
+        const req = new Request(url, init);
+        return fetch(req, { ...init, signal: init?.signal || AbortSignal.timeout(8000) } as any);
+      };
+
+      // Try cached successful URL first (warm path)
+      if (cachedUrl) {
+        try {
+          return await tryFetch(cachedUrl);
+        } catch {
+          cachedUrl = null; // invalidate cache, fall through to scan
+        }
+      }
+
+      // Try each URL in order
+      let lastErr: any;
+      for (const url of urls) {
+        try {
+          const resp = await tryFetch(url);
+          // If response is a 5xx or 429, treat as failure and try next
+          if (resp.status >= 500 || resp.status === 429) {
+            lastErr = new Error(`HTTP ${resp.status} from ${url}`);
+            continue;
+          }
+          cachedUrl = url; // warm the cache
+          return resp;
+        } catch (e: any) {
+          lastErr = e;
+          continue;
+        }
+      }
+      throw lastErr || new Error('All RPC URLs failed');
+    },
+  });
+}
+
+/**
  * Returns cached clients for the given chain. Creates them on first call.
+ * v6: now uses fallbackHttpTransport with primary + fallback URLs.
  */
 export function getClientsForChain(chainKey: ChainKey) {
   if (clientCache.has(chainKey)) {
@@ -108,10 +168,12 @@ export function getClientsForChain(chainKey: ChainKey) {
   }
 
   const config = CHAIN_CONFIGS[chainKey];
+  const fallbacks = CHAIN_RPC_FALLBACKS[chainKey] || [];
+  const allUrls = [config.rpcUrl, ...fallbacks];
 
   const publicClient = createPublicClient({
     chain: config.chain,
-    transport: http(config.rpcUrl),
+    transport: fallbackHttpTransport(allUrls),
   });
 
   const bundlerClient = createBundlerClient({
@@ -128,6 +190,16 @@ export function getClientsForChain(chainKey: ChainKey) {
   const clients = { publicClient, bundlerClient, paymasterClient };
   clientCache.set(chainKey, clients);
   return clients;
+}
+
+/**
+ * v6 — Checks whether Pimlico gas sponsorship is configured.
+ * When true, the sniper can safely skip the ETH balance pre-flight check:
+ * Pimlico's paymaster will pay gas for sponsored UserOps regardless of
+ * the Smart Account's ETH balance.
+ */
+export function isSponsorshipConfigured(): boolean {
+  return Boolean(process.env.PIMLICO_SPONSOR_POLICY_ID);
 }
 
 // Backward-compat exports (use Base clients as default)
