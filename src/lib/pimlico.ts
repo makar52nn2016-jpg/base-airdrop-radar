@@ -106,37 +106,23 @@ function pimlicoUrl(chainKey: ChainKey): string {
 }
 
 /**
- * v7 — Simplified RPC transport.
+ * v8 — Reverted to viem's standard http() transport with NO custom fetch.
  *
- * Previous v6 fallbackHttpTransport had a bug: viem's http transport passes
- * a Request OBJECT as the first arg to fetch (not a string URL), and our
- * wrapper was ignoring it, dropping the request body. This caused
- * "HTTP request failed. URL: [object Object]" errors on every eth_call
- * (especially for Safe Proxy Factory's proxyCreationCode() call).
+ * v6/v7 attempts to add a custom fetch wrapper (for timeout/fallback) caused
+ * "HTTP request failed. URL: [object Object]" errors. viem internally passes
+ * a Request OBJECT (not a string URL) as fetch's first arg, and our wrapper
+ * was mis-formatting the URL when displaying errors.
  *
- * v7 fixes this by using viem's standard http() with the primary RPC URL only.
- * The fallback list is kept for future use, but for now mainnet.base.org
- * (Coinbase official) is reliable enough to be primary without fallback.
- *
- * For multi-RPC reliability, see viem's `fallback` transport:
- * https://viem.sh/docs/clients/transports/fallback.html
+ * v8: just use viem's default http(url) — no custom fetch. The RPC switch
+ * from publicnode.com to mainnet.base.org (Coinbase official) in
+ * CHAIN_CONFIGS already addresses reliability.
  */
 function makeHttpTransport(url: string) {
-  return http({
-    url,
-    fetchOptions: { keepalive: true },
-    // Add a default timeout via AbortSignal if not set — prevents hung requests
-    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      const signal = init?.signal || AbortSignal.timeout(8000);
-      // Pass through viem's Request object as-is — DO NOT recreate
-      return fetch(input as any, { ...init, signal } as any);
-    },
-  });
+  return http(url);
 }
 
 /**
  * Returns cached clients for the given chain. Creates them on first call.
- * v7: now uses makeHttpTransport with single primary RPC URL.
  */
 export function getClientsForChain(chainKey: ChainKey) {
   if (clientCache.has(chainKey)) {
